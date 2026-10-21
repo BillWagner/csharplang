@@ -575,4 +575,1912 @@ Comparison of allowing `_` for a type and this proposal:
 Two single-file programs accompany this proposal (outside this repository; to be shared in the discussion). Both run with `dotnet run <file>.cs` on the .NET SDK 11 preview:
 
 * `existing-tests.cs` — demonstrates every current behavior listed in the Motivation, computing the observation at run time (section 11 covers a type named `_` of every kind in every syntactic position), plus a documented list of snippets that do not compile (with the diagnostic seen) because they cannot coexist in one file.
+
+```csharp
+// Phase 1: how `_` is treated TODAY (C# 14 / Roslyn in .NET SDK 11 preview).
+// Run with:  dotnet run existing-tests.cs
+//
+// Every line of output is "<case>: <observation>".  For each case the observation is
+// computed at run time (e.g. "binds to the local" vs "discard"), not asserted by hand.
+//
+// Cases that cannot compile together with the rest, or that do not compile at all, are
+// listed in the comment block at the bottom ("NOT RUNNABLE") together with the compiler
+// diagnostic that was observed when each snippet was compiled on its own.
+//
+// Warnings CS8512/CS8513 (constant/type named `_` in a pattern) are intentionally left
+// enabled-but-suppressed below so that the output stays readable.
+
+#:property AllowUnsafeBlocks=true
+#pragma warning disable CS8512, CS8513, CS0219, CS0168, CS8321, CS0414, CS0649, CS0169, CS0162, CS8794, CS8632
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+Console.WriteLine("=== 1. Declarations that make `_` a real name ===");
+Declarations.Run();
+
+Console.WriteLine("\n=== 2. Lambda and anonymous-method parameters ===");
+Lambdas.Run();
+
+Console.WriteLine("\n=== 3. out arguments ===");
+OutArguments.Run();
+
+Console.WriteLine("\n=== 4. Assignment and deconstruction ===");
+Assignments.Run();
+
+Console.WriteLine("\n=== 5. Patterns (is / switch / subpatterns / designations) ===");
+Patterns.Run();
+
+Console.WriteLine("\n=== 6. nameof / interpolation / member access ===");
+NamesAndStrings.Run();
+
+Console.WriteLine("\n=== 7. A type named `_` (each case in its own namespace so `_` is only visible there) ===");
+TypeNamedUnderscore.Run();
+
+Console.WriteLine("\n=== 8. A constant named `_` ===");
+ConstNamedUnderscore.Run();
+
+Console.WriteLine("\n=== 9. Members named `_` ===");
+MemberNamedUnderscore.Run();
+
+Console.WriteLine("\n=== 10. `@_` today ===");
+AtUnderscore.Run();
+
+Console.WriteLine("\n=== 11. A TYPE named `_` of every kind, in every syntactic position that compiles (namespaces K1..K15) ===");
+TypeKinds.Run();
+
+static class Out
+{
+    public static void Show(string label, object? value) => Console.WriteLine($"{label,-58}: {value}");
+}
+
+// ---------------------------------------------------------------------------------------
+// 1. Declarations. In all of these `_` is an ordinary identifier: it declares a named
+//    program element, it participates in scope rules, and later uses of `_` bind to it.
+// ---------------------------------------------------------------------------------------
+static class Declarations
+{
+    public static void Run()
+    {
+        { int _ = 1; Out.Show("1a  `int _ = 1;` then read `_`", $"named local, value {_}"); }
+        { var _ = 2; Out.Show("1b  `var _ = 2;` (declaration STATEMENT) then read `_`", $"named local, value {_}"); }
+        { int _ = 1; _ = 3; Out.Show("1c  `int _ = 1; _ = 3;`", $"assignment to the local, now {_}"); }
+        {
+            int sum = 0;
+            foreach (var _ in new[] { 10, 20 }) sum += _;
+            Out.Show("1d  `foreach (var _ in ...)` body reads `_`", $"named iteration variable, sum {sum}");
+        }
+        {
+            int sum = 0;
+            for (int _ = 0; _ < 3; _++) sum += _;
+            Out.Show("1e  `for (int _ = 0; ...)`", $"named loop variable, sum {sum}");
+        }
+        {
+            using var _ = new System.IO.MemoryStream(new byte[4]);
+            Out.Show("1f  `using var _ = ...;` then `_.Length`", $"named local, Length {_.Length}");
+        }
+        {
+            try { throw new InvalidOperationException("boom"); }
+            catch (Exception _) { Out.Show("1g  `catch (Exception _)` then `_.Message`", $"named exception variable, {_.Message}"); }
+        }
+        Out.Show("1h  method parameter `int _`", MethodParam(41));
+        {
+            int _() => 5;
+            Out.Show("1i  local function named `_`", $"called `_()` = {_()}");
+        }
+        {
+            var q = from _ in new[] { 1, 2, 3 } select _ * 2;
+            Out.Show("1j  query range variable `from _ in ...`", string.Join(",", q));
+        }
+        {
+            var q = from x in new[] { 1, 2, 3 } let _ = x * 10 select _;
+            Out.Show("1k  query `let _ = ...`", string.Join(",", q));
+        }
+        {
+            var t = (_: 1, b: 2);
+            Out.Show("1l  tuple element named `_`", $"t._ = {t._}");
+        }
+        {
+            Out.Show("1m  named argument `_:`", NamedArg(_: 7));
+        }
+        {
+            goto _;
+        _:
+            Out.Show("1n  label named `_`", "goto _ / _: works");
+        }
+    }
+
+    static string MethodParam(int _) => $"named parameter, value {_}";
+    static string NamedArg(int _) => $"named parameter, value {_}";
+}
+
+// ---------------------------------------------------------------------------------------
+// 2. Lambdas. A SINGLE `_` parameter is an ordinary parameter (compat). TWO OR MORE `_`
+//    parameters in the same list are discards. Whether a `_` is a name therefore depends on
+//    how many other `_` are in the same parameter list (Binder_Lambda.cs: underscoresCount).
+// ---------------------------------------------------------------------------------------
+static class Lambdas
+{
+    public static void Run()
+    {
+        Func<int, int> one = _ => _ + 1;
+        Out.Show("2a  `_ => _ + 1`", $"`_` is a real parameter, f(1) = {one(1)}");
+
+        Func<int, int> oneParen = (_) => _ + 1;
+        Out.Show("2b  `(_) => _ + 1`", $"`_` is a real parameter, f(1) = {oneParen(1)}");
+
+        Func<int, int> oneTyped = (int _) => _ + 1;
+        Out.Show("2c  `(int _) => _ + 1`", $"`_` is a real parameter, f(1) = {oneTyped(1)}");
+
+        Func<int, int> anon = delegate (int _) { return _ + 1; };
+        Out.Show("2d  `delegate (int _) { return _ + 1; }`", $"`_` is a real parameter, f(1) = {anon(1)}");
+
+        Func<int, int, int> mixed = (_, x) => _ + x;
+        Out.Show("2e  `(_, x) => _ + x`", $"ONE `_` => real parameter, f(1,2) = {mixed(1, 2)}");
+
+        Func<int, int, int> two = (_, _) => 0;
+        Out.Show("2f  `(_, _) => 0`", "two `_` => both are discards (no names introduced)");
+
+        Func<int, int, int, int> three = (_, x, _) => x;
+        Out.Show("2g  `(_, x, _) => x`", "two `_` => discards, `x` is a real parameter");
+
+        Func<int, int, int> typedTwo = (int _, int _) => 0;
+        Out.Show("2h  `(int _, int _) => 0`", "two `_` => discards");
+
+        Func<int, int, int> anonTwo = delegate (int _, int _) { return 0; };
+        Out.Show("2i  `delegate (int _, int _) { return 0; }`", "two `_` => discards");
+
+        // With discards, a `_` in the body is NOT the parameter: it binds to whatever is in
+        // scope outside (here a string local), proving the parameters introduced no name.
+        string _ = "outer-local";
+        Func<int, int, string> discardsSeeOuter = (_, _) => _;
+        Out.Show("2j  `(_, _) => _` with an outer local `_`", $"body binds to the OUTER `_`: \"{discardsSeeOuter(1, 2)}\"");
+
+        Func<int, string> singleHidesOuter = _ => _.ToString();
+        Out.Show("2k  `_ => _.ToString()` with an outer local `_`", $"parameter hides the outer `_`: \"{singleHidesOuter(5)}\"");
+
+        Func<int, int, int> nestedLocal = (_, _) => { int _ = 3; return _; };
+        Out.Show("2l  `(_, _) => { int _ = 3; return _; }`", $"discard params don't conflict with a body local `_`: {nestedLocal(0, 0)}");
+
+        string outer2 = "unchanged";
+        Func<int, int, bool> outInBody = (_, _) => int.TryParse("12", out var _);
+        Out.Show("2m  `(_, _) => int.TryParse(\"12\", out var _)`", $"discard inside a discard lambda: {outInBody(0, 0)}");
+
+        Action<int> assignInBody = _ => { _ = 5; Out.Show("2n  `_ => { _ = 5; ... }`", $"assigns to the single parameter (now {_})"); };
+        assignInBody(1);
+
+        Func<int, Func<int, int, int>> nested = _ => (_, _) => 0;
+        Out.Show("2o  `_ => (_, _) => 0`", "inner two `_` are discards; they do not conflict with outer param `_`");
+
+        var withDefaults = (int _ = 1, int _ = 2) => 0;
+        Out.Show("2p  `(int _ = 1, int _ = 2) => 0`", "two `_` => discards (also valid with default values)");
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// 3. out arguments. `out _` is a discard only if simple-name lookup of `_` fails.
+//    `out var _` and `out T _` are ALWAYS discards.
+// ---------------------------------------------------------------------------------------
+static class OutArguments
+{
+    public static void Run()
+    {
+        {
+            int.TryParse("5", out _);
+            Out.Show("3a  `out _` with no `_` in scope", "discard (the call compiles; `_` is not readable afterwards)");
+        }
+        {
+            int _ = -1;
+            int.TryParse("5", out _);
+            Out.Show("3b  `int _ = -1; ... out _`", $"binds to the LOCAL: `_` is now {_}");
+        }
+        {
+            int _ = -1;
+            int.TryParse("5", out var _);
+            Out.Show("3c  `int _ = -1; ... out var _`", $"discard: local `_` unchanged = {_}");
+        }
+        {
+            int _ = -1;
+            int.TryParse("5", out int _);
+            Out.Show("3d  `int _ = -1; ... out int _`", $"discard: local `_` unchanged = {_}");
+        }
+        {
+            string _ = "text";
+            int.TryParse("5", out var _);
+            Out.Show("3e  `string _ ...; out var _`", "discard, even though `_` is a string local (the `out _` form would be CS1503)");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// 4. Assignments / deconstruction.
+// ---------------------------------------------------------------------------------------
+static class Assignments
+{
+    public static void Run()
+    {
+        {
+            _ = 5;
+            Out.Show("4a  `_ = 5;` with no `_` in scope", "discard assignment (compiles; `_` isn't readable)");
+        }
+        {
+            int _ = 0;
+            _ = 5;
+            Out.Show("4b  `int _ = 0; _ = 5;`", $"assigns to the local: `_` = {_}");
+        }
+        {
+            int x;
+            (_, x) = (1, 2);
+            Out.Show("4c  `(_, x) = (1, 2);` with no `_` in scope", $"first element discarded, x = {x}");
+        }
+        {
+            int _ = 0; int x;
+            (_, x) = (1, 2);
+            Out.Show("4d  `int _ = 0; (_, x) = (1, 2);`", $"first element assigned to the LOCAL: `_` = {_}, x = {x}");
+        }
+        {
+            int _ = 0;
+            var (_, y) = (1, 2);
+            Out.Show("4e  `int _ = 0; var (_, y) = (1, 2);`", $"`var (_, y)` is a discard: local `_` still {_}, y = {y}");
+        }
+        {
+            int _ = 0;
+            (int _, int z) = (1, 2);
+            Out.Show("4f  `int _ = 0; (int _, int z) = (1, 2);`", $"typed designation is a discard: local `_` still {_}, z = {z}");
+        }
+        {
+            int _ = 0; int x;
+            (int a, var _, _) = (1, 2, 3);
+            Out.Show("4g  `(int a, var _, _) = (1, 2, 3);` with local `_`", $"`var _` discard, bare `_` assigns the LOCAL: `_` = {_}, a = {a}");
+        }
+        {
+            int x = 0;
+            ref int r = ref x;
+            _ = ref x;
+            Out.Show("4h  `_ = ref x;` with no `_` in scope", "ref discard assignment compiles");
+        }
+        {
+            int x = 0;
+            ref var _ = ref x;
+            _ = 9;
+            Out.Show("4i  `ref var _ = ref x;` (declaration STATEMENT)", $"named ref local: writes through, x = {x}");
+        }
+        {
+            int _ = 0;
+            _ += 4;
+            Out.Show("4j  `int _ = 0; _ += 4;`", $"compound assignment on the named local = {_}");
+        }
+        {
+            var results = new List<(int, int)> { (1, 2) };
+            foreach (var (_, b) in results) Out.Show("4k  `foreach (var (_, b) in ...)`", $"discard + b = {b}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// 5. Patterns.
+// ---------------------------------------------------------------------------------------
+static class Patterns
+{
+    public static void Run()
+    {
+        object o = 42;
+        {
+            var r = o is int _;
+            Out.Show("5a  `o is int _`", $"declaration pattern with discard designation: {r}");
+        }
+        {
+            int _ = 0;
+            var r = o is int _;
+            Out.Show("5b  `int _ = 0; o is int _`", $"discard designation, no conflict with local: {r}");
+        }
+        {
+            var r = o is var _;
+            Out.Show("5c  `o is var _`", $"var pattern with discard designation: {r}");
+        }
+        {
+            if (o is int n && n > 0) Out.Show("5d  (control) `o is int n`", "named designation");
+        }
+        {
+            var t = (1, 2);
+            Out.Show("5e  `t is (_, _)`", t is (_, _));
+        }
+        {
+            var s = "abc";
+            Out.Show("5f  `s is { Length: _ }`", s is { Length: _ });
+        }
+        {
+            int[] a = { 1, 2 };
+            Out.Show("5g  `a is [_, ..]`", a is [_, ..]);
+        }
+        {
+            int i = 5;
+            var r = i switch { 1 => "one", _ => "other" };
+            Out.Show("5h  switch expression `_ =>` (no `_` in scope)", $"discard pattern -> {r}");
+        }
+        {
+            int _ = 1; // a LOCAL (not a constant)
+            int i = 5;
+            var r = i switch { 1 => "one", _ => "other" };
+            Out.Show("5i  switch expression `_ =>` with a local `_` in scope", $"still the discard pattern -> {r}");
+        }
+        {
+            int i = 5;
+            switch (i)
+            {
+                case var _: Out.Show("5j  switch statement `case var _:`", "matches everything"); break;
+            }
+        }
+        {
+            int i = 5;
+            switch (i)
+            {
+                case int _: Out.Show("5k  switch statement `case int _:`", "type pattern + discard designation"); break;
+            }
+        }
+        {
+            var t = (1, 2);
+            int _ = 7;
+            var r = t is (_, _);
+            Out.Show("5l  `t is (_, _)` with a local `_`", $"still discard subpatterns -> {r}");
+        }
+        {
+            var t = (_: 1, b: 2);
+            Out.Show("5m  `t is (_: 1, b: 2)`", $"tuple element NAME `_` in a subpattern label -> {t is (_: 1, b: 2)}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// 6. nameof, interpolation, member access.
+// ---------------------------------------------------------------------------------------
+static class NamesAndStrings
+{
+    public static void Run()
+    {
+        {
+            int _ = 3;
+            Out.Show("6a  `nameof(_)` with a local `_`", nameof(_));
+            Out.Show("6b  `$\"{_}\"` with a local `_`", $"{_}");
+        }
+        {
+            var t = (_: "item", b: 2);
+            Out.Show("6c  `t._`", t._);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// 7. A TYPE named `_`.  Each case lives in its own namespace.
+// ---------------------------------------------------------------------------------------
+static class TypeNamedUnderscore
+{
+    public static void Run()
+    {
+        T1.X.Run(); T2.X.Run(); T3.X.Run(); T4.X.Run(); T5.X.Run(); T6.X.Run();
+    }
+}
+
+namespace T1
+{
+    class _ { }
+    static class X
+    {
+        public static void Run()
+        {
+            object o = new _();
+            object p = "not an _";
+            Out.Show("7a  type `_`: `o is _`", $"is-TYPE test (warning CS8513 compile-time): new _() -> {o is _}, string -> {p is _}");
+        }
+    }
+}
+namespace T2
+{
+    class _ { }
+    static class X
+    {
+        public static void Run()
+        {
+            object p = "not an _";
+            var r = p switch { _ => "arm `_` matched" };
+            Out.Show("7b  type `_`: switch expression arm `_ =>`", $"{r}  (a string matched => it is the DISCARD pattern, not type `_`)");
+        }
+    }
+}
+namespace T3
+{
+    class _ { }
+    static class X
+    {
+        public static void Run()
+        {
+            object p = "not an _";
+            string r = "no match";
+            switch (p) { case _: r = "case `_` matched"; break; }
+            Out.Show("7c  type `_`: switch statement `case _:`", $"{r}  (a string did not match => it is the TYPE pattern `_`; in a switch STATEMENT type `_` wins)");
+        }
+    }
+}
+namespace T4
+{
+    class _ { }
+    class D { public object P = "str"; }
+    static class X
+    {
+        public static void Run()
+        {
+            var d = new D();
+            Out.Show("7d  type `_`: property subpattern `{ P: _ }`", $"{(d is { P: _ })}  (P is a string => DISCARD pattern)");
+        }
+    }
+}
+namespace T5
+{
+    class _ { public override string ToString() => "an _"; }
+    static class X
+    {
+        public static void Run()
+        {
+            object o = new _();
+            // `@_` is the only way to spell the type in a declaration pattern: `_ x` does not parse (see NOT RUNNABLE).
+            if (o is @_ x) Out.Show("7e  type `_`: `o is @_ x`", $"declaration pattern on type `_` via `@_` -> {x}");
+            if (o is @_) Out.Show("7f  type `_`: `o is @_`", "is-type test via `@_`");
+            var r = o switch { @_ => "type-`_` pattern", _ => "discard" };
+            Out.Show("7g  type `_`: switch arm `@_ =>`", r);
+        }
+    }
+}
+namespace T6
+{
+    class _ { public string Hi() => "hi from type _"; }
+    static class X
+    {
+        public static void Run()
+        {
+            _ v = new _();
+            Out.Show("7h  type `_` as a normal type name", $"`_ v = new _();` -> {v.Hi()}");
+            var list = new List<_> { new _() };
+            Out.Show("7i  `List<_>`", $"type argument `_` -> Count {list.Count}");
+            int.TryParse("1", out var _);
+            Out.Show("7j  type `_` + `out var _`", "discard (type in scope doesn't matter for `var _`)");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// 8. A CONSTANT named `_`.
+// ---------------------------------------------------------------------------------------
+static class ConstNamedUnderscore
+{
+    const int _ = 1;
+
+    public static void Run()
+    {
+        Out.Show("8a  const `_ = 1`: `1 switch { 2 => \"two\", _ => \"arm _\" }`", 1 switch { 2 => "two", _ => "arm _ (either the constant or the discard: ambiguous, see 8b)" });
+        Out.Show("8b  const `_ = 1`: `5 switch { 2 => \"two\", _ => \"arm _\" }` (5 != 1)", Try(() => 5 switch { 2 => "two", _ => "arm _" }) + "  <- 5 matched `_`, so in a switch EXPRESSION the arm is the DISCARD pattern even though a constant `_` is in scope");
+        Out.Show("8c  const `_ = 1`: `5 switch { @_ => \"const\", var _ => \"discard\" }`", 5 switch { @_ => "const", var _ => "discard" });
+        string r = "none";
+        switch (5) { case _: r = "case _ matched"; break; default: r = "case _ did NOT match 5 => in a switch STATEMENT the constant wins: constant pattern (warning CS8512)"; break; }
+        Out.Show("8d  const `_ = 1`: `switch (5) { case _: .. }`", r);
+        Out.Show("8e  const `_ = 1`: subpatterns `(5, 6) is (_, _)`", $"{(5, 6) is (_, _)}  <- True: discard subpatterns (constant ignored)");
+        Out.Show("8f  const `_ = 1`: subpatterns `(1, 6) is (_, _)`", (1, 6) is (_, _));
+        Out.Show("8g  const `_ = 1`: `\"s\" is { Length: _ }` (Length 1)", "s" is { Length: _ });
+        Out.Show("8h  const `_ = 1`: `\"ss\" is { Length: _ }` (Length 2)", $"{"ss" is { Length: _ }}  <- True: discard subpattern");
+    }
+
+    static string Try(Func<string> f)
+    {
+        try { return f(); } catch (Exception e) { return e.GetType().Name; }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// 9. MEMBERS named `_` (fields, methods, properties, enum members, record parameters ...).
+// ---------------------------------------------------------------------------------------
+static class MemberNamedUnderscore
+{
+    public static void Run()
+    {
+        var c = new HasFieldUnderscore();
+        Out.Show("9a  field `_`: `_ = 5;` inside the class", c.AssignViaSimpleName());
+        Out.Show("9b  field `_`: out `_` inside the class", c.OutViaSimpleName());
+        Out.Show("9c  field `_`: deconstruct `(_, x) = (1, 2)` inside the class", c.DeconstructViaSimpleName());
+        Out.Show("9d  field `_`: `_` as a switch-expression arm inside the class", c.SwitchArm());
+        Out.Show("9e  method `_()` : call `_()`", new HasMethodUnderscore().Call());
+        Out.Show("9f  enum member `E._`", MyEnum._);
+        Out.Show("9g  record parameter `_`", new Rec(3)._);
+        Out.Show("9h  primary-constructor parameter `_`", new Prim(4).Get());
+        Out.Show("9i  object initializer `new C { _ = 6 }`", new HasPublicUnderscore { _ = 6 }._);
+        Out.Show("9j  member pattern `{ _: 6 }`", new HasPublicUnderscore { _ = 6 } is { _: 6 });
+    }
+
+    class HasFieldUnderscore
+    {
+        int _;
+        public string AssignViaSimpleName() { _ = 5; return $"`_ = 5` assigned the FIELD: {_}"; }
+        public string OutViaSimpleName() { int.TryParse("8", out _); return $"`out _` wrote the FIELD: {_}"; }
+        public string DeconstructViaSimpleName() { int x; (_, x) = (11, 2); return $"deconstruction wrote the FIELD: {_}"; }
+        public string SwitchArm() => 99 switch { 1 => "one", _ => "discard arm (field `_` is NOT a constant, so the arm stays a discard)" };
+    }
+    class HasMethodUnderscore { void _() { } public string Call() { _(); return "called method `_()`"; } }
+    enum MyEnum { _ }
+    record Rec(int _);
+    class Prim(int _) { public int Get() => _; }
+    class HasPublicUnderscore { public int _; }
+}
+
+// ---------------------------------------------------------------------------------------
+// 10. `@_` TODAY: it is just an identifier whose spelling is `_` ("@" is removed), so it is
+//     the same name as `_` in a declaration and in simple-name lookup.
+// ---------------------------------------------------------------------------------------
+static class AtUnderscore
+{
+    public static void Run()
+    {
+        {
+            int @_ = 5;
+            Out.Show("10a `int @_ = 5;` then `_`", $"same name: `_` reads {_}");
+        }
+        {
+            Func<int, int> f = @_ => _ + 1;
+            Out.Show("10b `@_ => _ + 1`", $"real parameter, f(1) = {f(1)}");
+        }
+        {
+            int @_ = 1;
+            int.TryParse("9", out @_);
+            Out.Show("10c `out @_` with a local", $"writes the local: {_}");
+        }
+        {
+            // For the two-underscore lambda rule, `@_` does NOT count as an underscore (it is not a
+            // contextual-keyword token), so `(_, @_) => ...` has ONE `_` (real param) and ONE `@_`
+            // (real param): duplicate parameter => CS0100 (see NOT RUNNABLE).
+            Out.Show("10d `(_, @_) =>`", "CS0100 duplicate parameter today (see NOT RUNNABLE)");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// 11. A TYPE named `_`.  Every kind of type is declared in its own namespace (K1..K15) so `_` is only a type
+//     inside that namespace.  Only positions that COMPILE are executed here; every position that does not
+//     compile for a type `_` is listed (with the observed diagnostic) in the "TYPE `_` MATRIX" comment at the bottom.
+//     Key facts these cases demonstrate:
+//       * `_ x`, `_ _x`, `_ _`, `(_)o`, `new _()`, `typeof(_)`, `default(_)`, `nameof(_)`, `List<_>`, `_.Foo`,
+//         `o is _`, `catch (_ e)`, `foreach (_ e in ..)`, `using (_ u = ..)`, `(_ a, _ b) =>`, `(_ a, _ b) = e` all bind `_` as the TYPE.
+//       * `o is _ or int`, `o is (_)`, `x switch { _ => .. }`, `(_, _)`/`{ P: _ }` subpatterns are the DISCARD pattern
+//         even though a type `_` is in scope (11A-4, 11A-5, 11A-7, 11A-8). A switch STATEMENT `case _:` is the type pattern (11A-6).
+//       * Inside the body of `_ => ...` the lambda parameter hides the type (11A-9, 11E-2).
+// ---------------------------------------------------------------------------------------
+static class TypeKinds
+{
+    public static void Run()
+    {
+        K1.X.Run(); K2.X.Run(); K3.X.Run(); K4.X.Run(); K5.X.Run(); K6.X.Run(); K7.X.Run();
+        K8.X.Run(); K9.X.Run(); K10.X.Run(); K11.X.Run(); K12.X.Run(); K13.X.Run(); K14.X.Run(); K15.X.Run();
+    }
+}
+
+namespace K1 // 11A: class
+{
+    class _ : Exception, IDisposable
+    {
+        public static int Foo = 7;
+        public int P = 3;
+        public void Dispose() { }
+    }
+
+    static class X
+    {
+        static void Q(out _ p) => p = new _();
+
+        public static void Run()
+        {
+            _ x = new _();
+            object o = x, s = "a string";
+            Out.Show("11A-1 class: decl / cast / new / typeof / nameof", $"`_ x`={x.P}; `(_)o`={((_)o).P}; `typeof(_)`={typeof(_).Name}; `nameof(_)`={nameof(_)}; `_.Foo`={_.Foo}");
+            Out.Show("11A-2 class: generic args / arrays / default", $"`List<_>`={new List<_> { x }.Count}; `new _[2]`={new _[2].Length}; `default(_)` is null={default(_) is null}");
+            Out.Show("11A-3 class: `is _` (string, `_` instance)", $"{s is _}, {o is _}  (type test)");
+            Out.Show("11A-4 class: `is _ or int` / `is (_)` (string)", $"{s is _ or int}, {s is (_)}  (true => `_` is the DISCARD here, not the type)");
+            Out.Show("11A-5 class: `s is { } and _` / `is int or _`", $"{s is { } and _}, {s is int or _}  (true => discard)");
+            string r = "no match";
+            switch (s) { case _: r = "matched"; break; }
+            Out.Show("11A-6 class: statement `case _:` (string)", $"{r}  (not matched => TYPE pattern)");
+            Out.Show("11A-7 class: switch expression arm `_ =>` (string)", s switch { _ => "matched" } + "  (matched => DISCARD)");
+            Out.Show("11A-8 class: positional/property subpattern `_`", $"{(s, 1) is (_, _)}, {(P: s, Q: 1) is { P: _ }}  (discard subpatterns)");
+            Func<_, _, int> f = (_ a, _ b) => a.P + b.P;
+            Func<_, int> g = _ => _.P;
+            Out.Show("11A-9 class: lambda `(_ a, _ b)` / `_ => _.P`", $"{f(x, x)}, {g(x)}  (the lambda parameter `_` hides the type inside the body)");
+            (_, _) pair = (x, x); (_ a, _ b) = pair;
+            Out.Show("11A-10 class: deconstruction `(_ a, _ b) = pair`", $"{a.P + b.P}");
+            _ q; Q(out q);
+            Q(out _ q2);
+            Out.Show("11A-11 class: `Q(out _ q)` typed out declaration", $"{q.P}, {q2.P}");
+            int n = 0; foreach (_ e in new[] { x, x }) n += e.P;
+            Out.Show("11A-12 class: `foreach (_ e in ...)`", n);
+            try { throw new _(); } catch (_ e) { Out.Show("11A-13 class: `catch (_ e)`", e.GetType().Name); }
+            try { throw new _(); } catch (_) { Out.Show("11A-14 class: `catch (_)`", "caught"); }
+            using (_ u = new _()) { Out.Show("11A-15 class: `using (_ u = new _())`", "ok"); }
+            {
+                _ _ = new _();
+                Out.Show("11A-16 class: Color Color `_ _ = new _();` `_.Foo`, `_.P`", $"{_.Foo}, {_.P}");
+            }
+            _ _x = new _(); _ x2 = new(); var xs = new _[] { new _() };
+            Out.Show("11A-17 class: `_ _x`, target-typed `new()`, `new _[] {..}`", $"{_x.P}, {x2.P}, {xs.Length}");
+            Out.Show("11A-18 class: `o as _`, `typeof(_[])`", $"{(o as _)?.P}, {typeof(_[]).Name}");
+        }
+    }
+}
+
+namespace K2 // 11B: struct
+{
+    struct _ { public static int Foo = 7; public int P; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            _ x = new _ { P = 3 };
+            object o = x, s = "a string";
+            Span<_> sp = stackalloc _[2];
+            _? n = null;
+            Out.Show("11B-1 struct: `_ x`, `_.Foo`, `Span<_> = stackalloc _[2]`, `_?`", $"{x.P}, {_.Foo}, {sp.Length}, {n.HasValue}");
+            Out.Show("11B-2 struct: `o is _`, `s is _`, `(_)o`, `default(_)`", $"{o is _}, {s is _}, {((_)o).P}, {default(_).P}");
+            unsafe { _* p = &x; Out.Show("11B-3 struct: `_* p`, `sizeof(_)`", $"{p->P}, {sizeof(_)}"); }
+        }
+    }
+}
+
+namespace K3 // 11C: interface
+{
+    interface _ { static int Foo = 7; int P { get; } }
+    class Impl : _ { public int P => 3; }
+    class D : _ { public int P => 4; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            _ i = new Impl();
+            object o = i, s = "a string";
+            Out.Show("11C-1 interface: `_ i`, `_.Foo`, `o is _`, `s is _`, `(_)o`", $"{i.P}, {_.Foo}, {o is _}, {s is _}, {((_)o).P}");
+            Out.Show("11C-2 interface: `class D : _`", new D().P);
+        }
+    }
+}
+
+namespace K4 // 11D: enum
+{
+    enum _ { Foo = 1, Bar = 2 }
+
+    static class X
+    {
+        public static void Run()
+        {
+            _ e = _.Foo; const _ k = _.Bar; object o = e, s = "a string";
+            var c = (_)2;
+            Out.Show("11D-1 enum: `_ e = _.Foo`, `const _ k`, `(_)2`, `e == _.Foo`", $"{e}, {k}, {c}, {e == _.Foo}");
+            Out.Show("11D-2 enum: `o is _`, `s is _`, `typeof(_)`, `nameof(_.Foo)`", $"{o is _}, {s is _}, {typeof(_).Name}, {nameof(_.Foo)}");
+            Out.Show("11D-3 enum: `Enum.GetValues<_>()`", string.Join(",", Enum.GetValues<_>()));
+        }
+    }
+}
+
+namespace K5 // 11E: delegate
+{
+    delegate int _(int a);
+
+    static class X
+    {
+        public static void Run()
+        {
+            _ d = a => a + 1; _ d2 = new _(a => a + 2);
+            object o = d, s = "a string";
+            Out.Show("11E-1 delegate: `_ d = a => ...`, `new _(...)`, `o is _`, `s is _`", $"{d(1)}, {d2(1)}, {o is _}, {s is _}");
+            Func<int, int> f = _ => _ + 1;
+            Out.Show("11E-2 delegate: `Func<int,int> f = _ => _ + 1` (lambda param hides type)", f(1));
+        }
+    }
+}
+
+namespace K6 // 11F: record
+{
+    record _(int P) { public static int Foo = 7; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            _ x = new _(3); object o = x, s = "a string";
+            var y = x with { P = 4 };
+            Out.Show("11F-1 record: `new _(3)`, `with`, `_.Foo`, `o is _`, `s is _`, `(_)o`", $"{x.P}, {y.P}, {_.Foo}, {o is _}, {s is _}, {((_)o).P}");
+            Out.Show("11F-2 record: `typeof(_)`, `nameof(_)`, ToString", $"{typeof(_).Name}, {nameof(_)}, {x}");
+        }
+    }
+}
+
+namespace K7 // 11G: record struct
+{
+    record struct _(int P) { public static int Foo = 7; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            _ x = new _(3); object o = x, s = "a string";
+            Out.Show("11G-1 record struct: `new _(3)`, `_.Foo`, `o is _`, `s is _`, `(_)o`", $"{x.P}, {_.Foo}, {o is _}, {s is _}, {((_)o).P}");
+        }
+    }
+}
+
+namespace K8 // 11H: generic type `_<T>`
+{
+    class _<T> { public static int Foo = 7; public T? V; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            _<int> x = new _<int> { V = 3 }; object o = x, s = "a string";
+            Out.Show("11H-1 generic: `_<int> x`, `new _<int>()`, `_<int>.Foo`, `typeof(_<>)`", $"{x.V}, {_<int>.Foo}, {typeof(_<>).Name}");
+            Out.Show("11H-2 generic: `o is _<int>`", "does not parse (CS1525); see TYPE `_` MATRIX. Using `@_<int>`: " + (o is @_<int>) + ", " + (s is @_<int>));
+        }
+    }
+}
+
+namespace K9 // 11I: using alias `_`
+{
+    using _ = System.Text.StringBuilder;
+
+    static class X
+    {
+        public static void Run()
+        {
+            _ sb = new _("ab"); object o = sb, s = "a string";
+            Out.Show("11I-1 alias: `_ sb = new _(..)`, `o is _`, `s is _`, `(_)o`, `typeof(_)`", $"{sb.Length}, {o is _}, {s is _}, {((_)o).Length}, {typeof(_).Name}");
+            Out.Show("11I-2 alias: `nameof(_)`", nameof(_));
+        }
+    }
+}
+
+namespace K10 // 11J: nested type
+{
+    static class X
+    {
+        class _ { public static int Foo = 7; public int P = 3; }
+
+        public static void Run()
+        {
+            _ x = new _(); object o = x, s = "a string";
+            Out.Show("11J-1 nested: `_ x = new _()`, `_.Foo`, `o is _`, `s is _`, `typeof(_).FullName`", $"{x.P}, {_.Foo}, {o is _}, {s is _}, {typeof(_).FullName}");
+        }
+    }
+}
+
+namespace K11 // 11K: type parameter `_`
+{
+    static class X
+    {
+        static string G<_>(object o) where _ : new()
+        {
+            _ v = new _(); var d = default(_);
+            return $"`_ v = new _()`={v}; `typeof(_)`={typeof(_).Name}; `o is _`={o is _}; `nameof(_)`={nameof(_)}";
+        }
+
+        static string H<_>(object o) => $"{((_)o)}, {o is _}, {o is _ or int}";
+
+        public static void Run()
+        {
+            Out.Show("11K-1 type param: `G<_>` body uses `_` as a type", G<object>(1));
+            Out.Show("11K-2 type param: `H<_>` `(_)o`, `o is _`, `o is _ or int`", H<string>("s"));
+        }
+    }
+}
+
+namespace K12 // 11L: namespace `_`
+{
+    namespace _ { public class Foo { public static int Bar = 7; } }
+    namespace Use
+    {
+        using _;
+        static class X
+        {
+            public static void Run()
+            {
+                var a = new _.Foo(); var b = new Foo();
+                Out.Show("11L-1 namespace: `new _.Foo()`, `using _;` + `Foo`, `_.Foo.Bar`, `nameof(_.Foo)`", $"{a.GetType().FullName}, {b.GetType().Name}, {_.Foo.Bar}, {nameof(_.Foo)}");
+                Out.Show("11L-2 namespace: `nameof(_)`", nameof(_));
+            }
+        }
+    }
+    static class X { public static void Run() => Use.X.Run(); }
+}
+
+namespace K13 // 11M: `using static _;` and extension methods in a static class `_`
+{
+    static class _ { public static int Foo = 7; public static int Ext(this int x) => x + 1; public class Inner { } }
+    namespace Use
+    {
+        using static _;
+        static class X
+        {
+            public static void Run()
+            {
+                Out.Show("11M-1 `using static _;` then `Foo`, `new Inner()`", $"{Foo}, {new Inner().GetType().Name}");
+                Out.Show("11M-2 extension method in static class `_`: `1.Ext()`", 1.Ext());
+            }
+        }
+    }
+    static class X { public static void Run() => Use.X.Run(); }
+}
+
+namespace K14 // 11N: attribute class `_`
+{
+    class _ : Attribute { }
+    [_] class A1 { }
+    [@_] class A2 { }
+    [_()] class A3 { }
+
+    static class X
+    {
+        public static void Run()
+        {
+            Out.Show("11N-1 attribute class `_`: `[_]` binds to", string.Join(",", typeof(A1).GetCustomAttributes(false).Select(a => a.GetType().Name)));
+            Out.Show("11N-2 attribute class `_`: `[@_]` binds to", string.Join(",", typeof(A2).GetCustomAttributes(false).Select(a => a.GetType().Name)));
+        }
+    }
+}
+
+namespace K15 // 11O: attribute class named `_Attribute`, referenced as `[_]` (a name that is NOT `_`)
+{
+    class _Attribute : Attribute { }
+    [_] class A1 { }
+    [_Attribute] class A2 { }
+
+    static class X
+    {
+        public static void Run()
+        {
+            Out.Show("11O-1 attribute class `_Attribute`: `[_]` binds to", string.Join(",", typeof(A1).GetCustomAttributes(false).Select(a => a.GetType().Name)));
+            Out.Show("11O-2 attribute class `_Attribute`: `[_Attribute]` binds to", string.Join(",", typeof(A2).GetCustomAttributes(false).Select(a => a.GetType().Name)));
+        }
+    }
+}
+
+// =======================================================================================
+// TYPE `_` MATRIX: every position below was compiled on its own (csc, -langversion:preview) against a type `_` of each
+// kind: C=class S=struct I=interface E=enum D=delegate R=record RS=record struct G=generic `_<T>` A=using alias
+// N=namespace `_` SC=static class T=attribute class.  Result "ok" means it compiles and `_` is the TYPE (or NS).
+// Diagnostics: CS0118 "'_' is a type but is used like a variable", CS0305 generic arity, CS1002/CS1003 syntax error.
+// Per-kind semantic errors that do not depend on `_` (e.g. `new _()` on an interface, `catch (_)` on a struct,
+// `stackalloc` of a class, static class as a variable type) are not listed.
+// =======================================================================================
+//
+// -- Positions that bind `_` as the TYPE (ok for C,S,I,E,D,R,RS,A,T unless a kind-specific reason is given) -----------------
+//   _ x = default;   _ x;   _ _x = default;   _ _ = default;   var f = _.Foo;        decl / Color Color
+//   var x = (_)o;    var x = new _();    new _ { };   _ x = new();   typeof(_)   typeof(_[])   default(_)
+//   Func<_, _, int> f = (_ a, _ b) => 0;   Func<_, int> f = _ => 0;   delegate (_ a) { return 1; }
+//   List<_> l;   new List<_>();   Gen<_>();   _[] a = new _[2];   _? n;   (_, int) t;   (_ a, int b) t;   ref _ r = ref l;
+//   foreach (_ x in ..)   foreach (_ _ in ..)   foreach (_ _x in ..)   using (_ x = ..)   using _ x = ..;   using var _ = new _();
+//   catch (_ e)   catch (_)   catch (_ _)          (class deriving from Exception only)
+//   Span<_> sp = stackalloc _[2]   (struct, enum, record struct)       unsafe { _* p; sizeof(_) }
+//   (_ a, _ b) = pair;   Q(out _ x);   method/field/property/parameter/return types `_ f;` `static _ M()` `M(_ p)` `M(_ _)` `M(_ _x)`
+//   _ L(_ a) => a;  (local function)   class D : _ {}   explicit operator _   where T : _   new _[] { }   o as _  (class-like kinds)
+//   [_] class A {}   (when `_` is an attribute class)       [return: _]       typeof(_) in attribute arguments
+//   o is _   (type test; warning CS8513 for class/struct/...)        switch statement `case _:` (type pattern)       (_) as cast target
+//   nameof(_)   (namespace `_` too)       static members `_.Foo`       `using static _;`       `using A = _;`
+//   Generic `_<T>`: `_<int> v`, `new _<int>()`, `_<int>.Foo`, `typeof(_<>)` are ok; the non-generic uses all give CS0305 (see below).
+//   Type parameter `_` (`M<_>()`, `class C<_>`): `_ v = new _()`, `default(_)`, `typeof(_)`, `o is _`, `case _:`, `(_)o`, `_.Foo` (static abstract) are ok.
+//
+// -- Syntax errors for a type `_` (independent of the kind; the pattern parser never starts a type with `_`) --------------
+//   o is _ y        error CS1002       o is _ _        error CS1002       o is _ _x       error CS1002
+//   o is _ { }      error CS1002       o is _ { P: 1 } error CS1002       o is _(1)       error CS1002 (positional/recursive on a type `_`)
+//   o is (_ y)      error CS1003       o is _<int>     error CS1525       o is _<int> y   error CS1525
+//   o is _.Foo      error CS1002/CS1003  (enum constant via a type `_`)     case _.Foo:     error CS1003
+//   e switch { _.Foo => 1, _ => 2 }    error CS1003/CS1525/CS8504
+//   case _ x:  case _ _x:   error CS1003          case _<int> y:   error CS1002,CS1003,CS1513,CS1525          (`case _ when true:` is ok: `_` is the type)
+//   o switch { _ x => 1 }  o switch { _ _x => 1 }  o switch { _ { } => 1 }    error CS1003
+//   tp is { Item1: _ x }   tp is (_ a, _ b)      error CS1003
+//   `@_` works in every one of these (`o is @_ y`, `o is @_ { P: 1 }`, `o is @_(1)`, `o is @_<int> y`, `case @_ x:`).
+//
+// -- A type `_` makes today's discards FAIL (`_` binds to the type before the discard fallback) -------------------------
+//   int.TryParse("1", out _);                   error CS0118 for C,S,I,E,D,R,RS,A,N,SC,T; CS0305 for generic `_<T>`
+//   _ = o;      _ += 1;      (_, x) = tp;       error CS0118 / CS0305 (same set)       (_, _) = pair; (_ a, _) = pair;   error CS0118
+//   nested type `_`:  int.TryParse("1", out _); _ = 1;      error CS0118       using _ = System.Int32; out _ / _ = 1;  error CS0118
+//   type parameter `_`: out _ , _ = 1                        error CS0118       namespace `_`: out _ , _ = 1             error CS0118
+//   Reason (Binder_Expressions.cs): the discard is only a FALLBACK (`FallBackOnDiscard`) taken when simple-name lookup of `_` fails.
+//   `var (_, x) = tp`, `out var _`, `out int _`, `foreach (var _ in ..)`, `var _ = 1;`, `x switch { _ => .. }`, `tp is (_, _)`
+//   and `tp is { Item1: _ }` are not affected (they are discard DESIGNATIONS/PATTERNS, never looked up).
+//
+// -- `_` in expression position when a type `_` exists ----------------------------------------------------------------
+//   var q = _;  $"{_}"  _ * 2  _ < i                 error CS0119 ('_' is a type, which is not valid in the given context)
+//   _[0] = 1;                                         error CS0119
+//   (_) + 1 (cast-or-paren)                           error CS0119 ('(_)' is a parenthesized type)      (_)-1  error CS0075
+//   var v = _.Foo.Bar;  (namespace `_`)               ok       (namespace `_` + `o is _`  error CS0118)
+//   int _ = 0; _.Foo                                  error CS1061 (a local `_` of another type wins; the type `_` is hidden)
+//   `_ _ = new _(); _.Foo` and `_.P`                  ok (Color Color)
+//
+// -- Generic type `_<T>` --------------------------------------------------------------------------------------------------
+//   every use of `_` without type arguments (`_ x`, `new _()`, `typeof(_)`, `(_)o`, `out _`, `_ = e` ...)   error CS0305
+//   `var _ = 1;`, `x switch { _ => .. }`, `tp is (_, _)`, `o is (_)`, `o is _ or int`, `nameof(_)`(CS0305), lambda `_ => ..` (ok)
+//   `_<int> v;` on non-generic kinds                  error CS0308 (non-generic type used with type arguments); alias/namespace `_<int>`: CS0307
+//
+// -- Namespace `_` --------------------------------------------------------------------------------------------------------
+//   `_ x;` `(_)o` `typeof(_)` `default(_)` `new _()` `out _` `_ = 1` `o is _` `case _:` `List<_>` ...   error CS0118 ('_' is a namespace but is used like a type/variable)
+//   `_.Foo x;` `new _.Foo()` `new global::_.Foo()` `using _;` `namespace _.X {}` `nameof(_)` `_.Foo.Bar` (expression)   ok
+//
+// -- Static class `_` -----------------------------------------------------------------------------------------------------
+//   every use as a variable/field/parameter/array/type argument type   error CS0723 / CS0721 / CS0719 / CS0718 (static types); `_.Foo`, `typeof(_)`, `o is _`, `using static _;`, extension `1.Ext()`  ok
+//
+// -- Both a type `_` and a name `_` in scope ------------------------------------------------------------------------------
+//   int _ = 0; _ x = default;   var x = (_)o;   new _();   typeof(_);   o is _;      all ok  (type contexts never see the local `_`)
+//   var _ = 1; var x = new _();                       ok
+//   foreach (var _ in arr) { new _(); }               ok
+//   int _ = 0; var x = _.Foo;                         error CS1061 (an expression `_.Foo` finds the local first)
+//
+// -- Attributes -----------------------------------------------------------------------------------------------------------
+//   class _ : Attribute: [_] ok, [@_] ok, [_()] ok, [return: _] ok   (see 11N)
+//   class _Attribute : Attribute: [_] binds to _Attribute (11O-1); [@_] error CS0246 (the verbatim `@` turns off the `Attribute` suffix probing);
+//                                 [_Attribute] ok (11O-2)
+//   Non-attribute type `_`: [_] error CS0616 (class/struct/enum/...) / CS0653 (interface)
+//
+// -- Declaring a type `_` -------------------------------------------------------------------------------------------------
+//   class/struct/interface/enum/delegate/record/record struct/class _<T>/using _ = X;/namespace _/type parameter `_`/nested type `_`   all ok
+//   class _ { int _; }  /  class _ { _ _; }   error CS0542 (member name equals enclosing type name; unrelated to the ambiguity)
+//
+// =======================================================================================
+// NOT RUNNABLE: snippets verified by compiling each on its own with the SDK's csc
+// (-langversion:preview).  "Expected" lines show the diagnostics actually reported.
+// =======================================================================================
+//
+// -- Names are real names, so duplicates are errors --------------------------------------
+//   int _ = 1; int _ = 2;                          error CS0128 (duplicate local)
+//   var _ = 1; var _ = 2;                          error CS0128   <- `var _` in a STATEMENT is a named local
+//   using var _ = ...; using var _ = ...;          error CS0128
+//   foreach (var _ in a) foreach (var _ in b) {}   error CS0136 (nested scope reuse)
+//   static void M(int _, int _) {}                 error CS0100 (method params are never discards)
+//   void F(int _, int _) {}   // local function    error CS0100
+//   class C(int _, int _) {}  / record R(int _, int _);   error CS0100 (+ CS0102 for the record)
+//   from _ in xs from _ in ys select 0;            error CS1930 (range variables are names)
+//   int _ = 1; int _ = 2  ordering: `_ = x; int _ = 2;`   error CS0841 (use before declaration)
+//
+// -- `_` as a plain simple name when NOTHING named `_` is in scope -----------------------
+//   var s = _;                                     error CS0103
+//   var s = nameof(_);                             error CS0103
+//   var s = $"{_}";                                error CS0103
+//   _ += 1;                                        error CS0103  (compound assignment is not a discard)
+//   int.TryParse("1", out _); Console.WriteLine(_); error CS0103 (the discard has no name)
+//   int.TryParse("1", out var _); Console.WriteLine(_);   error CS0103
+//   int.TryParse("1", out int _); Console.WriteLine(_);   error CS0103
+//   var (_, x) = (1, 2); Console.WriteLine(_);     error CS0103
+//   if (o is int _) Console.WriteLine(_);          error CS0103
+//   if (o is var _) Console.WriteLine(_);          error CS0103
+//   Func<int,int,int> f = (_, _) => _;             error CS0103 (discards introduce no name)
+//   System.Func<int,int,int> f = (@_, @_) => 0;    error CS0100
+//   void _() {} _ = 5;                             error CS1656 ('_' is a method group)
+//
+// -- Lambda mixing `_` and `@_` ----------------------------------------------------------
+//   Func<int,int,int> f = (_, @_) => @_;           error CS0100 + CS0229   (`@_` is not counted as an underscore)
+//   var f = _ => 1;                                error CS8917 (delegate type cannot be inferred; unrelated, but shows `_` is a name)
+//
+// -- `foreach` deconstruction without any `_` in scope -----------------------------------
+//   int x; foreach ((_, x) in new[]{(1,2)}) {}     error CS8186 (foreach must declare its iteration variables)
+//   int _ = 0; int a; foreach ((_, a) in new[]{(1,2)}) {}   error CS8186 (also with a local `_` in scope)
+//
+// -- `is _` / `case _:` -------------------------------------------------------------------
+//   object o = 1; var b = o is _;                  error CS0246 (binds `_` as a TYPE; nothing named `_`)
+//   object o = 1; int _ = 0; var b = o is _;       error CS0118 ('_' is a variable but is used like a type)
+//   const int _ = 1; int i = 1; var b = i is _;    error CS0118  (local constant)
+//   class C { const int _ = 1; bool M(int i) => i is _; }   error CS0246
+//        NOTE: the standard (patterns.md §11.2.7) says an accessible constant `_` makes `is _` a constant pattern.
+//        Roslyn does NOT do that for `is _`: the right operand of `is` is bound as a type first and the
+//        constant-pattern fallback is explicitly skipped when the identifier is `_` (Binder_Operators.cs: `wasUnderscore`).
+//   class C { int _ = 1; bool M(int i) => i is _; } error CS0246 (field)
+//   int i = 1; switch (i) { case _: break; }       error CS0103 (switch-statement `case _` is not a discard)
+//   int i = 1; var b = i is not _;                  (parses as discard pattern: `not _` => error CS8518 "can never match")
+//
+// -- A type named `_` in pattern designations (does not parse) ---------------------------
+//   class _ {}  o is _ x                           error CS1073 / CS1002   (`_ x` is not a declaration pattern)
+//   class _ {}  o is _ _                           parse errors
+//   class _ {}  case _ x:                          error CS1003
+//   class _ {}  o switch { _ x => 1 }              error CS1003
+//   class _ {}  t is (_ a, _ b)                    error CS1003
+//   class _ {}  d is { P: _ x }                    error CS1003
+//        NOTE: the standard's note in §11.2.7 says "`_` may appear as the type of a declaration_pattern (e.g. `_ x`)";
+//        Roslyn's parser (LanguageParser_Patterns.cs) never treats the token `_` as the start of a type there.
+//        `@_ x` works (see case 7e).
+//   class _ {}  o is not _                          error CS8518 (discard pattern)
+//
+// -- `@_` --------------------------------------------------------------------------------
+//   int i = 1; var r = i switch { @_ => "a", var _ => "b" };   error CS0103 (`@_` is a simple name, nothing named `_`)
+//   record R(int _);  works; record R(int _, int _);          error CS0100
+//
+// -- Notes -------------------------------------------------------------------------------
+//   * `using _ = System.Console;` (case 1o) is a compile-time alias named `_`; it is a namespace-level
+//     name so it lives in a different declaration space from locals.
+//   * Roslyn gives WRN_IsTypeNamedUnderscore (CS8513) for `o is _` when `_` is a type, and
+//     WRN_CaseConstantNamedUnderscore (CS8512) for `case _:` when `_` is a constant. These are the only
+//     diagnostics Roslyn gives today that warn about the `_` ambiguity.
+//
+// -- Where the current standard text (patterns.md §11.2.7) and Roslyn disagree (observed above) --
+//   * Constant `_` in a switch EXPRESSION arm or in a subpattern: standard => constant pattern; Roslyn => discard (8b, 8e-8h).
+//   * Constant `_` in `x is _`: standard => constant pattern; Roslyn => error CS0246/CS0118 (the RHS is bound as a type).
+//   * Constant `_` in switch-statement `case _:`: constant pattern + warning CS8512 (agrees; case 8d).
+//   * Type `_` in `x is _`: type test + warning CS8513 (agrees; case 7a).
+//   * Type `_` in a switch-expression arm / subpattern / `case _:`: expression arm and property subpattern are DISCARD (7b, 7d),
+//     the switch-statement `case _:` is the TYPE pattern (7c).
+//   * Type `_` as declaration_pattern type (`_ x`): standard says allowed; Roslyn's parser rejects it; use `@_ x` (7e).
+```
+
 * `new-behavior-tests.cs` — for each of those cases shows what the proposal does (a runnable "migrated" form wherever the behavior can be expressed today, since `@_` is available today; a clearly marked "describe-only" note where the new behavior cannot be executed because the proposal is not implemented).
+
+```csharp
+// Phase 3: how each case from existing-tests.cs behaves under the "unconditional discard token" proposal.
+// Run with:  dotnet run new-behavior-tests.cs
+//
+// The proposal is NOT implemented, so this file can only execute what today's compiler can express.
+// Each case below is therefore one of:
+//
+//   [SAME]      Behavior is unchanged by the proposal. Executed here with the code exactly as in existing-tests.cs.
+//   [MIGRATED]  Today's meaning of `_` is a NAME, which the proposal turns into an error (or into a discard).
+//               The code shown is the form that keeps the name: the identifier `@_`.  `@_` is accepted by today's
+//               compiler and, under the proposal, it is the (only) spelling of an identifier named `_`, so the
+//               executed output is the proposal's behavior for the migrated program.
+//   [DISCARD]   Code that is valid under the proposal and, with today's compiler, means something different
+//               or does not compile. These snippets are inside `#if PROPOSAL_ONLY` blocks (never compiled)
+//               and are DESCRIBE-ONLY; the comment states the proposed meaning and today's behavior.
+//   [ERROR]     Code that becomes an error under the proposal (DESCRIBE-ONLY: today it compiles), with the
+//               migrated fix executed in the same case.
+//
+// The line "  BEFORE:" in a comment is the observation recorded in existing-tests.cs for the same case id.
+
+#:property AllowUnsafeBlocks=true
+#pragma warning disable CS8512, CS8513, CS0219, CS0168, CS8321, CS0414, CS0649, CS0169, CS0162, CS8794, CS8632, CS8520
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+Console.WriteLine("=== 1. Declarations ===");
+Declarations.Run();
+Console.WriteLine("\n=== 2. Lambdas ===");
+Lambdas.Run();
+Console.WriteLine("\n=== 3. out arguments ===");
+OutArguments.Run();
+Console.WriteLine("\n=== 4. Assignment and deconstruction ===");
+Assignments.Run();
+Console.WriteLine("\n=== 5. Patterns ===");
+Patterns.Run();
+Console.WriteLine("\n=== 6. nameof / interpolation / member access ===");
+NamesAndStrings.Run();
+Console.WriteLine("\n=== 7. A type named _ ===");
+TypeNamedUnderscore.Run();
+Console.WriteLine("\n=== 8. A constant named _ ===");
+ConstNamedUnderscore.Run();
+Console.WriteLine("\n=== 9. Members named _ ===");
+MemberNamedUnderscore.Run();
+Console.WriteLine("\n=== 10. @_ under the proposal ===");
+AtUnderscore.Run();
+Console.WriteLine("\n=== 11. A TYPE named _ of every kind (migrated to @_; see the Option X / Option Y comment block at the end of section 11) ===");
+TypeKinds.Run();
+
+static class TypeOut
+{
+    public static void Show(string label, object? value) => Console.WriteLine($"{label,-72}: {value}");
+}
+
+static class Out
+{
+    public static void Show(string label, string kind, object? value) => Console.WriteLine($"{label,-6}{kind,-12}{value}");
+}
+
+static class Declarations
+{
+    public static void Run()
+    {
+        // 1a  BEFORE: `int _ = 1; ... _` => named local.
+        //     AFTER : `int _ = 1;` is an error at the declaration, even if never read.  Migrated:
+        { int @_ = 1; Out.Show("1a", "[MIGRATED]", $"`int @_ = 1;` named local, value {@_}"); }
+#if PROPOSAL_ONLY
+        { int _ = 1; Console.WriteLine(_); }   // [ERROR] local declarations require an identifier; use '@_'
+        { int _ = Compute(); }                // [ERROR] even an unused local requires an identifier; use `_ = Compute();` to discard
+#endif
+
+        // 1b  BEFORE: `var _ = 2;` => named local.  AFTER: error at the declaration.  Migrated:
+        { var @_ = 2; Out.Show("1b", "[MIGRATED]", $"`var @_ = 2;` named local, value {@_}"); }
+#if PROPOSAL_ONLY
+        { var _ = 2; var _ = 3; }              // [ERROR] both declarations are invalid (today: CS0128 for the duplicate)
+#endif
+
+        // 1c  BEFORE: `int _ = 1; _ = 3;` assigned the local.  AFTER: the second statement is a discard assignment;
+        //     the first is an error at the declaration.  Migrated:
+        { int @_ = 1; @_ = 3; Out.Show("1c", "[MIGRATED]", $"`int @_ = 1; @_ = 3;` now {@_}"); }
+
+        // 1d  foreach
+        {
+            int sum = 0;
+            foreach (var @_ in new[] { 10, 20 }) sum += @_;
+            Out.Show("1d", "[MIGRATED]", $"`foreach (var @_ ...) sum += @_;` sum {sum}");
+        }
+#if PROPOSAL_ONLY
+        foreach (var _ in new[] { 10, 20 }) Console.WriteLine("tick");   // [ERROR] iteration-variable declarations require an identifier
+        foreach (var _ in a) foreach (var _ in b) { }                   // [ERROR] both declarations are invalid (today: CS0136)
+        foreach (var _ in new[] { 10, 20 }) sum += _;                   // [ERROR] invalid iteration-variable declaration and read
+#endif
+
+        // 1e  for
+        {
+            int sum = 0;
+            for (int @_ = 0; @_ < 3; @_++) sum += @_;
+            Out.Show("1e", "[MIGRATED]", $"`for (int @_ = 0; ...)` sum {sum}");
+        }
+
+        // 1f  using var
+        {
+            using var @_ = new System.IO.MemoryStream(new byte[4]);
+            Out.Show("1f", "[MIGRATED]", $"`using var @_ = ...; @_.Length` = {@_.Length}");
+        }
+#if PROPOSAL_ONLY
+        using var _ = new System.IO.MemoryStream();  // [ERROR] resource declarations require an identifier; use '@_'
+        using var _ = new System.IO.MemoryStream();  // [ERROR] still invalid (today: CS0128 for the duplicate)
+#endif
+
+        // 1g  catch
+        {
+            try { throw new InvalidOperationException("boom"); }
+            catch (Exception @_) { Out.Show("1g", "[MIGRATED]", $"`catch (Exception @_)` => {@_.Message}"); }
+        }
+#if PROPOSAL_ONLY
+        try { } catch (Exception _) { }   // [ERROR] use `catch (Exception)` or a named variable `catch (Exception @_)`
+#endif
+
+        // 1h  method parameter: BEFORE named; AFTER error at the declaration (not a discard position).  Migrated:
+        Out.Show("1h", "[MIGRATED]", MethodParam(41));
+#if PROPOSAL_ONLY
+        static string MethodParamBad(int _) => "";   // [ERROR] '_' is a discard; use '@_' to name a parameter '_'
+#endif
+
+        // 1i  local function named `_`: AFTER error at the declaration.  Migrated:
+        {
+            int @_() => 5;
+            Out.Show("1i", "[MIGRATED]", $"local function `@_`, call `@_()` = {@_()}");
+        }
+
+        // 1j / 1k  query variables
+        {
+            var q = from @_ in new[] { 1, 2, 3 } select @_ * 2;
+            Out.Show("1j", "[MIGRATED]", string.Join(",", q));
+        }
+        {
+            var q = from x in new[] { 1, 2, 3 } let @_ = x * 10 select @_;
+            Out.Show("1k", "[MIGRATED]", string.Join(",", q));
+        }
+
+        // 1l  tuple element name
+        {
+            var t = (@_: 1, b: 2);
+            Out.Show("1l", "[MIGRATED]", $"`(@_: 1, b: 2)`, `t.@_` = {t.@_}");
+        }
+
+        // 1m  named argument
+        Out.Show("1m", "[MIGRATED]", NamedArg(@_: 7));
+
+        // 1n  label
+        {
+            goto @_;
+        @_:
+            Out.Show("1n", "[MIGRATED]", "`goto @_; @_:` works");
+        }
+    }
+
+    static string MethodParam(int @_) => $"parameter `@_`, value {@_}";
+    static string NamedArg(int @_) => $"parameter `@_`, value {@_}";
+    static int Compute() => 0;
+}
+
+static class Lambdas
+{
+    public static void Run()
+    {
+        // 2a-2e: today a single `_` is a NAME.  AFTER: always a discard parameter; reading it is an error.
+        Func<int, int> one = @_ => @_ + 1;
+        Out.Show("2a", "[MIGRATED]", $"`@_ => @_ + 1`  f(1) = {one(1)}");
+        Func<int, int> oneParen = (@_) => @_ + 1;
+        Out.Show("2b", "[MIGRATED]", $"`(@_) => @_ + 1`  f(1) = {oneParen(1)}");
+        Func<int, int> oneTyped = (int @_) => @_ + 1;
+        Out.Show("2c", "[MIGRATED]", $"`(int @_) => @_ + 1`  f(1) = {oneTyped(1)}");
+        Func<int, int> anon = delegate (int @_) { return @_ + 1; };
+        Out.Show("2d", "[MIGRATED]", $"`delegate (int @_) {{ ... }}`  f(1) = {anon(1)}");
+        Func<int, int, int> mixed = (@_, x) => @_ + x;
+        Out.Show("2e", "[MIGRATED]", $"`(@_, x) => @_ + x`  f(1,2) = {mixed(1, 2)}");
+#if PROPOSAL_ONLY
+        Func<int, int> d1 = _ => 0;                       // [DISCARD] discard parameter (today: a named parameter)
+        Func<int, int> e1 = _ => _ + 1;                   // [ERROR] '_' is a discard
+        Func<int, int, int> e2 = (_, x) => _ + x;         // [ERROR]
+        Func<int, int, int> m = (_, @_) => @_;            // [DISCARD+NAMED] OK: first is a discard, second is a parameter named '_'. Today CS0100/CS0229
+        Func<int, string> r = _ => "const";               // [DISCARD] no name introduced; no conflict with an outer `_`
+#endif
+
+        // 2f-2i: already discards today and stay discards.  [SAME]
+        Func<int, int, int> two = (_, _) => 0;
+        Out.Show("2f", "[SAME]", "`(_, _) => 0` discards");
+        Func<int, int, int, int> three = (_, x, _) => x;
+        Out.Show("2g", "[SAME]", $"`(_, x, _) => x` -> {three(1, 2, 3)}");
+        Func<int, int, int> typedTwo = (int _, int _) => 0;
+        Out.Show("2h", "[SAME]", "`(int _, int _) => 0` discards");
+        Func<int, int, int> anonTwo = delegate (int _, int _) { return 0; };
+        Out.Show("2i", "[SAME]", "`delegate (int _, int _)` discards");
+
+        // 2j  BEFORE: `string _ = ..; (_, _) => _` bound the body `_` to the OUTER local.
+        //     AFTER : the outer declaration `string _` is an error; the lambda body `_` is also an invalid discard read.
+        //     Migrated: outer local is `@_`; the body must say `@_`.
+        string @_ = "outer-local";
+        Func<int, int, string> discardsSeeOuter = (_, _) => @_;
+        Out.Show("2j", "[MIGRATED]", $"`(_, _) => @_` sees outer `@_`: \"{discardsSeeOuter(1, 2)}\"");
+
+        // 2k  BEFORE: `_ => _.ToString()` parameter hid the outer `_`.  Migrated to a named parameter `@_` (which hides the outer `@_`)
+        Func<int, string> singleHidesOuter = @_ => @_.ToString();
+        Out.Show("2k", "[MIGRATED]", $"`@_ => @_.ToString()` parameter hides outer `@_`: \"{singleHidesOuter(5)}\"");
+
+        Func<int, int, int> nestedLocal = (_, _) => { int @x = 3; return x; };
+        Out.Show("2l", "[SAME]", "discard params don't conflict with a body local; the local is just not named `_` any more");
+
+        Func<int, int, bool> outInBody = (_, _) => int.TryParse("12", out var _);
+        Out.Show("2m", "[SAME]", $"`out var _` inside a discard lambda: {outInBody(0, 0)}");
+
+        Action<int> assignInBody = @_ => { @_ = 5; Out.Show("2n", "[MIGRATED]", $"assigns to the named parameter `@_` (now {@_})"); };
+        assignInBody(1);
+#if PROPOSAL_ONLY
+        Action<int> assignDiscard = _ => { _ = 5; };      // [DISCARD] discard assignment inside; no parameter is written
+#endif
+
+        Func<int, Func<int, int, int>> nested = _ => (_, _) => 0;
+        Out.Show("2o", "[SAME]", "inner `(_, _)` discards; outer `_` is a discard parameter under the proposal (a named parameter today), still legal");
+
+        var withDefaults = (int _ = 1, int _ = 2) => 0;
+        Out.Show("2p", "[SAME]", "`(int _ = 1, int _ = 2) => 0` discards");
+    }
+}
+
+static class OutArguments
+{
+    public static void Run()
+    {
+        // 3a  [SAME]
+        { int.TryParse("5", out _); Out.Show("3a", "[SAME]", "`out _` discard"); }
+
+        // 3b  BEFORE: with a local `_`, `out _` assigned the local.  AFTER: always a discard.
+        //     To keep the old behavior the local is named `@_` and the argument must be `out @_`.
+        {
+            int @_ = -1;
+            int.TryParse("5", out @_);
+            Out.Show("3b", "[MIGRATED]", $"`int @_ = -1; out @_` assigns the named local: now {@_}");
+        }
+#if PROPOSAL_ONLY
+        {
+            int @_ = -1;
+            int.TryParse("5", out _);                     // [DISCARD] discard; `@_` stays -1  (today: assigns the local named `_`/`@_`)
+        }
+#endif
+
+        // 3c / 3d / 3e  [SAME]: `out var _` / `out int _` are discards today and under the proposal
+        { int @_ = -1; int.TryParse("5", out var _); Out.Show("3c", "[SAME]", $"`out var _`: local `@_` unchanged = {@_}"); }
+        { int @_ = -1; int.TryParse("5", out int _); Out.Show("3d", "[SAME]", $"`out int _`: local `@_` unchanged = {@_}"); }
+        { string @_ = "text"; int.TryParse("5", out var _); Out.Show("3e", "[SAME]", "`out var _` with a string `@_` in scope"); }
+#if PROPOSAL_ONLY
+        { string @_ = "text"; int.TryParse("5", out _); } // [DISCARD] OK now (today: CS1503 because `_` bound to the string)
+#endif
+    }
+}
+
+static class Assignments
+{
+    public static void Run()
+    {
+        // 4a  [SAME]
+        { _ = 5; Out.Show("4a", "[SAME]", "`_ = 5;` discard assignment"); }
+
+        // 4b  BEFORE: `int _ = 0; _ = 5;` assigned the local.  Migrated:
+        { int @_ = 0; @_ = 5; Out.Show("4b", "[MIGRATED]", $"`int @_ = 0; @_ = 5;` => {@_}"); }
+#if PROPOSAL_ONLY
+        { int @_ = 0; _ = 5; }                            // [DISCARD] discard assignment; `@_` stays 0 (today: assigns it)
+#endif
+
+        // 4c  [SAME]
+        { int x; (_, x) = (1, 2); Out.Show("4c", "[SAME]", $"`(_, x) = (1, 2);` x = {x}"); }
+
+        // 4d  BEFORE: `int _ = 0; (_, x) = (1, 2);` assigned the local `_` = 1.  Migrated:
+        { int @_ = 0; int x; (@_, x) = (1, 2); Out.Show("4d", "[MIGRATED]", $"`(@_, x) = (1, 2)` => `@_` = {@_}, x = {x}"); }
+#if PROPOSAL_ONLY
+        { int @_ = 0; int x; (_, x) = (1, 2); }           // [DISCARD] first element discarded; `@_` stays 0 (today: assigns it)
+#endif
+
+        // 4e / 4f  [SAME]
+        { int @_ = 0; var (_, y) = (1, 2); Out.Show("4e", "[SAME]", $"`var (_, y)`: `@_` still {@_}, y = {y}"); }
+        { int @_ = 0; (int _, int z) = (1, 2); Out.Show("4f", "[SAME]", $"`(int _, int z)`: `@_` still {@_}, z = {z}"); }
+
+        // 4g  BEFORE: bare `_` in the deconstruction assigned the local.  Migrated (explicit `@_`):
+        { int @_ = 0; (int a, var _, @_) = (1, 2, 3); Out.Show("4g", "[MIGRATED]", $"`(int a, var _, @_)`: `@_` = {@_}, a = {a}"); }
+
+        // 4h  [SAME]
+        { int x = 0; _ = ref x; Out.Show("4h", "[SAME]", "`_ = ref x;` ref discard assignment"); }
+
+        // 4i  BEFORE: `ref var _ = ref x;` => named ref local.  AFTER: error (ref discard declarations are not part of the proposal; use `_ = ref x;`)
+        { int x = 0; ref var @_ = ref x; @_ = 9; Out.Show("4i", "[MIGRATED]", $"`ref var @_ = ref x;` writes through: x = {x}"); }
+
+        // 4j  BEFORE: `_ += 4` compound assignment on the named local.  AFTER: error for a discard.  Migrated:
+        { int @_ = 0; @_ += 4; Out.Show("4j", "[MIGRATED]", $"`@_ += 4` => {@_}"); }
+#if PROPOSAL_ONLY
+        { _ += 4; }                                       // [ERROR] compound assignment to a discard (already an error today when `_` is not in scope: CS0103)
+#endif
+
+        // 4k  [SAME]
+        foreach (var (_, b) in new List<(int, int)> { (1, 2) }) Out.Show("4k", "[SAME]", $"`foreach (var (_, b) ...)` b = {b}");
+
+        // 4l  foreach ((_, a) in ...) is error CS8186 today and under the proposal (needs declarations).  [SAME, describe-only]
+    }
+}
+
+static class Patterns
+{
+    public static void Run()
+    {
+        object o = 42;
+        Out.Show("5a", "[SAME]", $"`o is int _` -> {o is int _}");
+        { int @_ = 0; Out.Show("5b", "[SAME]", $"`o is int _` with `@_` in scope -> {o is int _}"); }
+        Out.Show("5c", "[SAME]", $"`o is var _` -> {o is var _}");
+        if (o is int n && n > 0) Out.Show("5d", "[SAME]", "named designation");
+        Out.Show("5e", "[SAME]", $"`t is (_, _)` -> {(1, 2) is (_, _)}");
+        Out.Show("5f", "[SAME]", $"`s is {{ Length: _ }}` -> {"abc" is { Length: _ }}");
+        int[] arr = { 1, 2 };
+        Out.Show("5g", "[SAME]", $"`a is [_, ..]` -> {arr is [_, ..]}");
+        {
+            int i = 5;
+            Out.Show("5h", "[SAME]", $"`i switch {{ 1 => \"one\", _ => \"other\" }}` -> {i switch { 1 => "one", _ => "other" }}");
+        }
+        {
+            int @_ = 1;
+            int i = 5;
+            Out.Show("5i", "[SAME]", $"`_ =>` with `@_` in scope is still the discard -> {i switch { 1 => "one", _ => "other" }}");
+        }
+        { int i = 5; switch (i) { case var _: Out.Show("5j", "[SAME]", "`case var _:` matches everything"); break; } }
+        { int i = 5; switch (i) { case int _: Out.Show("5k", "[SAME]", "`case int _:`"); break; } }
+        { int @_ = 7; Out.Show("5l", "[SAME]", $"`(1,2) is (_, _)` with `@_` in scope -> {(1, 2) is (_, _)}"); }
+
+        // 5m  BEFORE: `t is (_: 1, b: 2)` used a tuple element NAME `_`.  AFTER: error.  Migrated:
+        {
+            var t = (@_: 1, b: 2);
+            Out.Show("5m", "[MIGRATED]", $"`t is (@_: 1, b: 2)` -> {t is (@_: 1, b: 2)}");
+        }
+#if PROPOSAL_ONLY
+        { var t = (_: 1, b: 2); var r = t is (_: 1, b: 2); }   // [ERROR] '_' is a discard: tuple element names and subpattern labels need '@_'
+        { object p = 1; var r = p is _; }                      // [ERROR] bare '_' as the whole `is` pattern (unchanged rule; use `var _`)
+        { int i = 1; switch (i) { case _: break; } }           // [ERROR] bare '_' as the whole `case` pattern (use `case var _:`)
+#endif
+    }
+}
+
+static class NamesAndStrings
+{
+    public static void Run()
+    {
+        // 6a/6b  BEFORE: `nameof(_)` and `$"{_}"` with a local `_`.  AFTER: errors; migrated with `@_`.
+        {
+            int @_ = 3;
+            Out.Show("6a", "[MIGRATED]", $"`nameof(@_)` = {nameof(@_)}");
+            Out.Show("6b", "[MIGRATED]", $"`$\"{{@_}}\"` = {@_}");
+        }
+        // 6c  tuple element access `t._` => `t.@_`
+        { var t = (@_: "item", b: 2); Out.Show("6c", "[MIGRATED]", $"`t.@_` = {t.@_}"); }
+#if PROPOSAL_ONLY
+        { int x = 0; var s = nameof(_); var u = $"{_}"; var v = _; }   // [ERROR] x3: a discard cannot be read or named
+#endif
+    }
+}
+
+static class TypeNamedUnderscore
+{
+    public static void Run()
+    {
+        T1.X.Run(); T2.X.Run(); T3.X.Run(); T4.X.Run(); T5.X.Run(); T6.X.Run();
+    }
+}
+
+// Every `class _` below is spelled `@_` under the proposal (declaring a type with the bare `_` is an error).
+namespace T1
+{
+    class @_ { }
+    static class X
+    {
+        public static void Run()
+        {
+            object o = new @_();
+            object p = "not an _";
+            // 7a  BEFORE: `o is _` was an is-type test (warning CS8513).  AFTER: `o is _` is an error; the type test is `o is @_`.
+            Out.Show("7a", "[MIGRATED]", $"`o is @_` -> {o is @_}, string -> {p is @_}");
+        }
+    }
+}
+namespace T2
+{
+    class @_ { }
+    static class X
+    {
+        public static void Run()
+        {
+            object p = "not an _";
+            var r = p switch { _ => "arm `_` matched" };
+            Out.Show("7b", "[SAME]", $"{r}  (the `_` arm is the discard today and under the proposal)");
+        }
+    }
+}
+namespace T3
+{
+    class @_ { }
+    static class X
+    {
+        public static void Run()
+        {
+            object p = new @_();
+            string r = "no match";
+            // 7c  BEFORE: `case _:` with a type `_` was the TYPE pattern.  AFTER: bare `case _:` is an error; write `case @_:` for the type pattern
+            switch (p) { case @_: r = "case @_: matched the type"; break; }
+            Out.Show("7c", "[MIGRATED]", r);
+#if PROPOSAL_ONLY
+            switch (p) { case _: break; }                  // [ERROR] use `case var _:` for "match anything"
+#endif
+        }
+    }
+}
+namespace T4
+{
+    class @_ { }
+    class D { public object P = "str"; }
+    static class X
+    {
+        public static void Run()
+        {
+            var d = new D();
+            Out.Show("7d", "[SAME]", $"`{{ P: _ }}` on a string is still a discard subpattern -> {(d is { P: _ })}");
+        }
+    }
+}
+namespace T5
+{
+    class @_ { public override string ToString() => "an _"; }
+    static class X
+    {
+        public static void Run()
+        {
+            object o = new @_();
+            if (o is @_ x) Out.Show("7e", "[SAME]", $"`o is @_ x` -> {x}  (the only spelling that parses today, unchanged)");
+            if (o is @_) Out.Show("7f", "[SAME]", "`o is @_` type test");
+            var r = o switch { @_ => "type-`_` pattern", _ => "discard" };
+            Out.Show("7g", "[SAME]", r);
+        }
+    }
+}
+namespace T6
+{
+    class @_ { public string Hi() => "hi from type _"; }
+    static class X
+    {
+        public static void Run()
+        {
+            @_ v = new @_();
+            Out.Show("7h", "[MIGRATED]", $"`@_ v = new @_();` -> {v.Hi()}");
+            var list = new List<@_> { new @_() };
+            Out.Show("7i", "[MIGRATED]", $"`List<@_>` -> Count {list.Count}");
+            int.TryParse("1", out var _);
+            Out.Show("7j", "[SAME]", "`out var _` is a discard");
+        }
+    }
+}
+
+static class ConstNamedUnderscore
+{
+    const int @_ = 1;
+
+    public static void Run()
+    {
+        // 8a/8b  BEFORE: in a switch EXPRESSION the arm `_` stayed a discard even with a constant `_` in scope.  [SAME]
+        Out.Show("8a", "[SAME]", $"`5 switch {{ 2 => .., _ => \"discard arm\" }}` -> {5 switch { 2 => "two", _ => "discard arm" }}");
+        // 8c  `@_ =>` is the constant pattern
+        Out.Show("8c", "[SAME]", $"`5 switch {{ @_ => \"const\", var _ => \"discard\" }}` -> {5 switch { @_ => "const", var _ => "discard" }}");
+        // 8d  BEFORE: switch STATEMENT `case _:` was the constant pattern (CS8512).  AFTER: error; write `case @_:`.
+        string r = "none";
+        switch (5) { case @_: r = "matched constant"; break; default: r = "`case @_:` did NOT match 5 (constant is 1)"; break; }
+        Out.Show("8d", "[MIGRATED]", r);
+        // 8e-8h  subpatterns: discard before and after.  [SAME]
+        Out.Show("8e", "[SAME]", $"`(5, 6) is (_, _)` -> {(5, 6) is (_, _)}");
+        Out.Show("8g", "[SAME]", $"`\"s\" is {{ Length: _ }}` -> {"s" is { Length: _ }}");
+#if PROPOSAL_ONLY
+        const int _ = 1;                                   // [ERROR] a constant cannot be declared with a discard-token; use `const int @_ = 1;`
+        switch (5) { case _: break; }                      // [ERROR] bare '_' as a whole `case` pattern
+#endif
+    }
+}
+
+static class MemberNamedUnderscore
+{
+    public static void Run()
+    {
+        var c = new HasFieldUnderscore();
+        // 9a-9c  BEFORE: inside the class, `_ = 5`, `out _`, `(_, x) = ..` assigned the FIELD named `_`.
+        //        AFTER : the field must be declared `@_`, and those statements become DISCARDS (they no longer touch the field) - this is
+        //                the "silent change" described in the proposal (section D) when the field comes from another assembly.
+        //                The migrated form that keeps the old behavior writes `@_` at each use.
+        Out.Show("9a", "[MIGRATED]", c.AssignViaSimpleName());
+        Out.Show("9b", "[MIGRATED]", c.OutViaSimpleName());
+        Out.Show("9c", "[MIGRATED]", c.DeconstructViaSimpleName());
+        Out.Show("9d", "[SAME]", c.SwitchArm());
+        Out.Show("9e", "[MIGRATED]", new HasMethodUnderscore().Call());
+        Out.Show("9f", "[MIGRATED]", MyEnum.@_);
+        Out.Show("9g", "[MIGRATED]", new Rec(3).@_);
+        Out.Show("9h", "[MIGRATED]", new Prim(4).Get());
+        Out.Show("9i", "[MIGRATED]", new HasPublicUnderscore { @_ = 6 }.@_);
+        Out.Show("9j", "[MIGRATED]", new HasPublicUnderscore { @_ = 6 } is { @_: 6 });
+    }
+
+    class HasFieldUnderscore
+    {
+        int @_;
+        public string AssignViaSimpleName() { @_ = 5; return $"`@_ = 5` assigned the FIELD: {@_}"; }
+        public string OutViaSimpleName() { int.TryParse("8", out @_); return $"`out @_` wrote the FIELD: {@_}"; }
+        public string DeconstructViaSimpleName() { int x; (@_, x) = (11, 2); return $"`(@_, x) = ..` wrote the FIELD: {@_}"; }
+        public string SwitchArm() => 99 switch { 1 => "one", _ => "discard arm (unchanged)" };
+#if PROPOSAL_ONLY
+        public void Discards() { _ = 5; int.TryParse("8", out _); int x; (_, x) = (1, 2); }   // [DISCARD] none of these touch the field `@_`
+#endif
+    }
+    class HasMethodUnderscore { void @_() { } public string Call() { @_(); return "called method `@_()`"; } }
+    enum MyEnum { @_ }
+    record Rec(int @_);
+    class Prim(int @_) { public int Get() => @_; }
+    class HasPublicUnderscore { public int @_; }
+}
+
+static class AtUnderscore
+{
+    public static void Run()
+    {
+        // Today `@_` and `_` are the same name.  Under the proposal they are different:
+        //   `@_` is an identifier named "_", `_` is the discard token. This section only exercises what `@_` can do (all of it works today).
+        { int @_ = 5; Out.Show("10a", "[SAME]", $"`int @_ = 5; @_` -> {@_}"); }
+        { Func<int, int> f = @_ => @_ + 1; Out.Show("10b", "[SAME]", $"`@_ => @_ + 1` -> {f(1)}"); }
+        { int @_ = 1; int.TryParse("9", out @_); Out.Show("10c", "[SAME]", $"`out @_` -> {@_}"); }
+        { Out.Show("10d", "[DESCRIBE]", "`(_, @_) => @_`: today CS0100/CS0229; under the proposal OK (first a discard, second a parameter named `_`)"); }
+#if PROPOSAL_ONLY
+        { int @_ = 7; Console.WriteLine(_); }              // [ERROR] bare `_` does not refer to `@_`
+        { Func<int, int, int> f = (_, @_) => @_; }         // OK under the proposal
+#endif
+    }
+}
+// ---- Section 11 body: type `_` of every kind, migrated to `@_` ----
+static class TypeKinds { public static void Run() {
+ K1.X.Run(); K2.X.Run(); K3.X.Run(); K4.X.Run(); K5.X.Run(); K6.X.Run(); K7.X.Run();
+ K8.X.Run(); K9.X.Run(); K10.X.Run(); K11.X.Run(); K12.X.Run(); K13.X.Run(); K14.X.Run(); K15.X.Run(); } }
+// 11A: class `_`
+namespace K1
+{
+    class @_ : Exception, IDisposable
+    {
+        public static int Foo = 7;
+        public int P = 3;
+        public void Dispose() { }
+    }
+
+    static class X
+    {
+        static void Q(out @_ p) => p = new @_();
+
+        public static void Run()
+        {
+            @_ x = new @_();
+            object o = x, s = "a string";
+            TypeOut.Show("[MIGRATED] 11A-1 class: decl / cast / new / typeof / nameof", $"`@_ x`={x.P}; `(@_)o`={((@_)o).P}; `typeof(@_)`={typeof(@_).Name}; `nameof(@_)`={nameof(@_)}; `@_.Foo`={@_.Foo}");
+            TypeOut.Show("[MIGRATED] 11A-2 class: generic args / arrays / default", $"`List<@_>`={new List<@_> { x }.Count}; `new @_[2]`={new @_[2].Length}; `default(@_)` is null={default(@_) is null}");
+            TypeOut.Show("[MIGRATED] 11A-3 class: `is @_` (string, `@_` instance)", $"{s is @_}, {o is @_}  (type test)");
+            TypeOut.Show("[SAME] 11A-4 class: `is _ or int` / `is (_)` (string)", $"{s is _ or int}, {s is (_)}  (true => `_` is the DISCARD here, not the type)");
+            TypeOut.Show("[SAME] 11A-5 class: `s is { } and _` / `is int or _`", $"{s is { } and _}, {s is int or _}  (true => discard)");
+            string r = "no match";
+            switch (s) { case @_: r = "matched"; break; }
+            TypeOut.Show("[MIGRATED] 11A-6 class: statement `case @_:` (string)", $"{r}  (not matched => TYPE pattern)");
+            TypeOut.Show("[SAME] 11A-7 class: switch expression arm `_ =>` (string)", s switch { _ => "matched" } + "  (matched => DISCARD)");
+            TypeOut.Show("[SAME] 11A-8 class: positional/property subpattern `_`", $"{(s, 1) is (_, _)}, {(P: s, Q: 1) is { P: _ }}  (discard subpatterns)");
+            Func<@_, @_, int> f = (@_ a, @_ b) => a.P + b.P;
+            Func<@_, int> g = @_ => @_.P;
+            TypeOut.Show("[MIGRATED] 11A-9 class: lambda `(@_ a, @_ b)` / `@_ => @_.P`", $"{f(x, x)}, {g(x)}  (the lambda parameter `@_` hides the type inside the body)");
+            (@_, @_) pair = (x, x); (@_ a, @_ b) = pair;
+            TypeOut.Show("[MIGRATED] 11A-10 class: deconstruction `(@_ a, @_ b) = (x, x)`", $"{a.P + b.P}");
+            @_ q; Q(out q);
+            Q(out @_ q2);
+            TypeOut.Show("[MIGRATED] 11A-11 class: `Q(out @_ q)` typed out declaration", $"{q.P}, {q2.P}");
+            int n = 0; foreach (@_ e in new[] { x, x }) n += e.P;
+            TypeOut.Show("[MIGRATED] 11A-12 class: `foreach (@_ e in ...)`", n);
+            try { throw new @_(); } catch (@_ e) { TypeOut.Show("[MIGRATED] 11A-13 class: `catch (@_ e)`", e.GetType().Name); }
+            try { throw new @_(); } catch (@_) { TypeOut.Show("[MIGRATED] 11A-14 class: `catch (@_)`", "caught"); }
+            using (@_ u = new @_()) { TypeOut.Show("[MIGRATED] 11A-15 class: `using (@_ u = new @_())`", "ok"); }
+            {
+                @_ @_ = new @_();
+                TypeOut.Show("[MIGRATED] 11A-16 class: Color Color `@_ @_ = new @_();` `@_.Foo`, `@_.P`", $"{@_.Foo}, {@_.P}");
+            }
+            @_ _x = new @_(); @_ x2 = new(); var xs = new @_[] { new @_() };
+            TypeOut.Show("[MIGRATED] 11A-17 class: `@_ _x`, target-typed `new()`, `new @_[] {..}`", $"{_x.P}, {x2.P}, {xs.Length}");
+            TypeOut.Show("[MIGRATED] 11A-18 class: `o as @_`, `typeof(@_[])`", $"{(o as @_)?.P}, {typeof(@_[]).Name}");
+        }
+    }
+}
+
+// 11B: struct `_`
+namespace K2
+{
+    struct @_ { public static int Foo = 7; public int P; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            @_ x = new @_ { P = 3 };
+            object o = x, s = "a string";
+            Span<@_> sp = stackalloc @_[2];
+            @_? n = null;
+            TypeOut.Show("[MIGRATED] 11B-1 struct: `@_ x`, `@_.Foo`, `Span<@_> = stackalloc @_[2]`, `@_?`", $"{x.P}, {@_.Foo}, {sp.Length}, {n.HasValue}");
+            TypeOut.Show("[MIGRATED] 11B-2 struct: `o is @_`, `s is @_`, `(@_)o`, `default(@_)`", $"{o is @_}, {s is @_}, {((@_)o).P}, {default(@_).P}");
+            unsafe { @_* p = &x; TypeOut.Show("[MIGRATED] 11B-3 struct: `@_* p`, `sizeof(@_)`", $"{p->P}, {sizeof(@_)}"); }
+        }
+    }
+}
+
+// 11C: interface `_`
+namespace K3
+{
+    interface @_ { static int Foo = 7; int P { get; } }
+    class Impl : @_ { public int P => 3; }
+    class D : @_ { public int P => 4; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            @_ i = new Impl();
+            object o = i, s = "a string";
+            TypeOut.Show("[MIGRATED] 11C-1 interface: `@_ i`, `@_.Foo`, `o is @_`, `s is @_`, `(@_)o`", $"{i.P}, {@_.Foo}, {o is @_}, {s is @_}, {((@_)o).P}");
+            TypeOut.Show("[MIGRATED] 11C-2 interface: `class D : @_`", new D().P);
+        }
+    }
+}
+
+// 11D: enum `_`
+namespace K4
+{
+    enum @_ { Foo = 1, Bar = 2 }
+
+    static class X
+    {
+        public static void Run()
+        {
+            @_ e = @_.Foo; const @_ k = @_.Bar; object o = e, s = "a string";
+            var c = (@_)2;
+            TypeOut.Show("[MIGRATED] 11D-1 enum: `@_ e = @_.Foo`, `const @_ k`, `(@_)2`, `e == @_.Foo`", $"{e}, {k}, {c}, {e == @_.Foo}");
+            TypeOut.Show("[MIGRATED] 11D-2 enum: `o is @_`, `s is @_`, `typeof(@_)`, `nameof(@_.Foo)`", $"{o is @_}, {s is @_}, {typeof(@_).Name}, {nameof(@_.Foo)}");
+            TypeOut.Show("[MIGRATED] 11D-3 enum: `Enum.GetValues<@_>()`", string.Join(",", Enum.GetValues<@_>()));
+        }
+    }
+}
+
+// 11E: delegate `_`
+namespace K5
+{
+    delegate int @_(int a);
+
+    static class X
+    {
+        public static void Run()
+        {
+            @_ d = a => a + 1; @_ d2 = new @_(a => a + 2);
+            object o = d, s = "a string";
+            TypeOut.Show("[MIGRATED] 11E-1 delegate: `@_ d = a => ...`, `new @_(...)`, `o is @_`, `s is @_`", $"{d(1)}, {d2(1)}, {o is @_}, {s is @_}");
+            Func<int, int> f = @_ => @_ + 1;
+            TypeOut.Show("[MIGRATED] 11E-2 delegate: `Func<int,int> f = @_ => @_ + 1` (lambda param hides type)", f(1));
+        }
+    }
+}
+
+// 11F: record `_`
+namespace K6
+{
+    record @_(int P) { public static int Foo = 7; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            @_ x = new @_(3); object o = x, s = "a string";
+            var y = x with { P = 4 };
+            TypeOut.Show("[MIGRATED] 11F-1 record: `new @_(3)`, `with`, `@_.Foo`, `o is @_`, `s is @_`, `(@_)o`", $"{x.P}, {y.P}, {@_.Foo}, {o is @_}, {s is @_}, {((@_)o).P}");
+            TypeOut.Show("[MIGRATED] 11F-2 record: `typeof(@_)`, `nameof(@_)`, ToString", $"{typeof(@_).Name}, {nameof(@_)}, {x}");
+        }
+    }
+}
+
+// 11G: record struct `_`
+namespace K7
+{
+    record struct @_(int P) { public static int Foo = 7; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            @_ x = new @_(3); object o = x, s = "a string";
+            TypeOut.Show("[MIGRATED] 11G-1 record struct: `new @_(3)`, `@_.Foo`, `o is @_`, `s is @_`, `(@_)o`", $"{x.P}, {@_.Foo}, {o is @_}, {s is @_}, {((@_)o).P}");
+        }
+    }
+}
+
+// 11H: generic type `_<T>`
+namespace K8
+{
+    class @_<T> { public static int Foo = 7; public T? V; }
+
+    static class X
+    {
+        public static void Run()
+        {
+            @_<int> x = new @_<int> { V = 3 }; object o = x, s = "a string";
+            TypeOut.Show("[MIGRATED] 11H-1 generic: `@_<int> x`, `new @_<int>()`, `@_<int>.Foo`, `typeof(@_<>)`", $"{x.V}, {@_<int>.Foo}, {typeof(@_<>).Name}");
+            TypeOut.Show("[MIGRATED] 11H-2 generic: `o is @_<int>`", "does not parse (CS1525); see existing-tests.cs. Using `@_<int>`: " + (o is @_<int>) + ", " + (s is @_<int>));
+        }
+    }
+}
+
+// 11I: using alias `_`
+namespace K9
+{
+    using @_ = System.Text.StringBuilder;
+
+    static class X
+    {
+        public static void Run()
+        {
+            @_ sb = new @_("ab"); object o = sb, s = "a string";
+            TypeOut.Show("[MIGRATED] 11I-1 alias: `@_ sb = new @_(..)`, `o is @_`, `s is @_`, `(@_)o`, `typeof(@_)`", $"{sb.Length}, {o is @_}, {s is @_}, {((@_)o).Length}, {typeof(@_).Name}");
+            TypeOut.Show("[MIGRATED] 11I-2 alias: `nameof(@_)`", nameof(@_));
+        }
+    }
+}
+
+// 11J: nested type `_`
+namespace K10
+{
+    static class X
+    {
+        class @_ { public static int Foo = 7; public int P = 3; }
+
+        public static void Run()
+        {
+            @_ x = new @_(); object o = x, s = "a string";
+            TypeOut.Show("[MIGRATED] 11J-1 nested: `@_ x = new @_()`, `@_.Foo`, `o is @_`, `s is @_`, `typeof(@_).FullName`", $"{x.P}, {@_.Foo}, {o is @_}, {s is @_}, {typeof(@_).FullName}");
+        }
+    }
+}
+
+// 11K: type parameter `_`
+namespace K11
+{
+    static class X
+    {
+        static string G<@_>(object o) where @_ : new()
+        {
+            @_ v = new @_(); var d = default(@_);
+            return $"`@_ v = new @_()`={v}; `typeof(@_)`={typeof(@_).Name}; `o is @_`={o is @_}; `nameof(@_)`={nameof(@_)}";
+        }
+
+        static string H<@_>(object o) => $"{((@_)o)}, {o is @_}, {o is @_ or int}";
+
+        public static void Run()
+        {
+            TypeOut.Show("[MIGRATED] 11K-1 type param: `G<@_>` body uses `@_` as a type", G<object>(1));
+            TypeOut.Show("[MIGRATED] 11K-2 type param: `H<@_>` `(@_)o`, `o is @_`, `o is @_ or int`", H<string>("s"));
+        }
+    }
+}
+
+// 11L: namespace `_`
+namespace K12
+{
+    namespace @_ { public class Foo { public static int Bar = 7; } }
+    namespace Use
+    {
+        using @_;
+        static class X
+        {
+            public static void Run()
+            {
+                var a = new @_.Foo(); var b = new Foo();
+                TypeOut.Show("[MIGRATED] 11L-1 namespace: `new @_.Foo()`, `using @_;` + `Foo`, `@_.Foo.Bar`, `nameof(@_.Foo)`", $"{a.GetType().FullName}, {b.GetType().Name}, {@_.Foo.Bar}, {nameof(@_.Foo)}");
+                TypeOut.Show("[MIGRATED] 11L-2 namespace: `nameof(@_)`", nameof(@_));
+            }
+        }
+    }
+    static class X { public static void Run() => Use.X.Run(); }
+}
+
+// 11M: `using static _;`
+namespace K13
+{
+    static class @_ { public static int Foo = 7; public static int Ext(this int x) => x + 1; public class Inner { } }
+    namespace Use
+    {
+        using static @_;
+        static class X
+        {
+            public static void Run()
+            {
+                TypeOut.Show("[MIGRATED] 11M-1 `using static @_;` then `Foo`, `new Inner()`", $"{Foo}, {new Inner().GetType().Name}");
+                TypeOut.Show("[MIGRATED] 11M-2 extension method in static class `@_`: `1.Ext()`", 1.Ext());
+            }
+        }
+    }
+    static class X { public static void Run() => Use.X.Run(); }
+}
+
+// 11N: attribute `_`
+namespace K14
+{
+    class @_ : Attribute { }
+    [@_] class A1 { }
+    [@_] class A2 { }
+    [@_()] class A3 { }
+
+    static class X
+    {
+        public static void Run()
+        {
+            TypeOut.Show("[MIGRATED] 11N-1 attribute: `[@_]` binds to", string.Join(",", typeof(A1).GetCustomAttributes(false).Select(a => a.GetType().Name)));
+            TypeOut.Show("[MIGRATED] 11N-2 attribute: `[@_]` binds to", string.Join(",", typeof(A2).GetCustomAttributes(false).Select(a => a.GetType().Name)));
+        }
+    }
+}
+
+namespace K15
+{
+    class _Attribute : Attribute { }
+    [_Attribute] class A1 { }
+    [_Attribute] class A2 { }
+
+    static class X
+    {
+        public static void Run()
+        {
+            TypeOut.Show("[MIGRATED] 11O-1 attribute class `_Attribute`: `[_Attribute]` binds to", string.Join(",", typeof(A1).GetCustomAttributes(false).Select(a => a.GetType().Name)));
+            TypeOut.Show("[MIGRATED] 11O-2 attribute class `_Attribute`: `[_Attribute]` binds to", string.Join(",", typeof(A2).GetCustomAttributes(false).Select(a => a.GetType().Name)));
+        }
+    }
+}
+
+
+// =======================================================================================
+// Summary of the proposal's effect on each Phase 1 case family
+//
+//  1  Declarations (locals, foreach, for, using, catch)  : declaration becomes a DISCARD declaration; any READ of `_` => error.
+//     Method/local-function/ctor/record parameters, fields, types, enum members, labels, query variables, tuple names, named
+//     arguments: error at the declaration; `@_` is the fix.
+//  2  Lambdas                                          : every `_` parameter is a discard, whatever the count. 2a-2e become errors where the
+//     body reads `_`; `_ => 0` just works as a discard.
+//  3  out _                                            : always a discard.  `out @_` for the variable.
+//  4  `_ = e`, `(_, x) = e`                            : always a discard assignment.  `@_ = e`, `(@_, x) = e` for the variable.
+//  5  Patterns                                         : discard arms/subpatterns/designations unchanged; bare `_` as the whole `is`/`case`
+//     pattern stays an error; `case _:` with a constant/type `_` is no longer a constant/type pattern (use `@_`).
+//  6  nameof, interpolation, `t._`                     : errors for `_`; `@_` fixes them.
+//  7  Type named `_`                                   : declared and used as `@_` everywhere (`_ x` never parsed as a declaration pattern).
+//  8  Constant named `_`                               : declared `@_`; `case @_:` is the constant pattern; `_` arms/subpatterns are discards.
+//  9  Member named `_`                                 : declared and accessed as `@_`; bare `_ = e`/`out _`/`(_, x)` become discards.
+// 10  `@_`                                             : the identifier spelling of `_`; no longer equivalent to bare `_`.
+// 11  Type named `_` (any kind)                        : Option Y (proposal as written): every declaration and reference becomes an error; `@_`
+//     everywhere is the fix (section 11 above runs the migrated code; outputs match the `_` version in existing-tests.cs).
+//     `[_]` that bound to `class _Attribute` also breaks: write `[_Attribute]` (`[@_]` does not probe the `Attribute` suffix).
+//     Option X (type `_` stays legal, never a variable): all of section 11 compiles unchanged; `out _`, `_ = e`, `(_, x) = e`
+//     stop failing with CS0118 and become discards even when a type `_` is in scope. See the proposal's "Type `_`" section.
+// =======================================================================================
+```
