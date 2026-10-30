@@ -5,379 +5,300 @@ Champion issue: TBD
 ## Summary
 [summary]: #summary
 
-Today the token `_` is either an *identifier* (a name for a local, parameter, field, type, constant, ...) or a *discard*, and which one it is depends on the syntactic context, on how many `_` appear in the same list, on whether the construct existed before discards were added, and on what simple-name lookup of `_` finds. This proposal makes `_` **always a discard-token**. It is never an identifier and never binds to a declaration. A program element intended to be named `_` must be written `@_`. That includes types and namespaces: `_` is neither a type nor a variable (see [Type `_`](#type-_)).
-
-```csharp
-int _ = Compute();          // today: a local named `_`;   proposed: error at the declaration (write @_ for a named local).
-Use(_);                     // today: reads that local;    proposed: error ('_' is a discard; write @_ if you meant a name)
-Func<int, int> f = _ => 0;  // today: a parameter named `_`; proposed: a discard parameter
-int @_ = Compute();         // identifier named `_` in every version of the language, today and proposed
-```
+Today the token `_` is either an *identifier* (a name for a local, parameter, field, type, constant, property, method, event, enum, delegate, or alias) or a *discard*, and which one it is depends on the syntactic context, on how many `_` appear in the same list, on whether the construct existed before discards were added, and on what simple-name lookup of `_` finds. This proposal makes `_` **always a discard-token**. It is never an identifier and never binds to a declaration. A program element intended to be named `_` must be written `@_`. Today, the `@_` is only required to resolve an ambiguity. That includes types and namespaces: `_` is neither a type nor a variable (see [Type `_`](#type-_)).
 
 ## Motivation
 [motivation]: #motivation
 
-`_` was an ordinary identifier long before C# 7.0 introduced discards. To avoid breaking existing programs, each place that later learned to accept a discard kept the old meaning whenever the old syntax was legal. The result is that the meaning of `_` is determined by *history* rather than by a rule a developer can state. Everything below was verified by compiling and running the code with the .NET SDK 11 preview compiler (see the companion `existing-tests.cs`, described in [Test programs](#test-programs)).
+`_` was an ordinary identifier prior to  C# 7.0 introduction of discards. To avoid breaking existing programs, `_` was still valid as an identifier in most locations. The result is that the meaning of `_` is determined by *history* rather than by a single rule a developer can state. Developers need to remember complex rules, and have a decoder ring on when some syntax elements were added.
 
-**The same token has different meanings in neighbouring constructs.**
-
-| Code | Meaning of `_` today |
-| --- | --- |
-| `int _ = 1;` / `var _ = 1;` | A *named local*. `var _ = 1; var _ = 2;` is error CS0128. |
-| `foreach (var _ in xs)`, `for (int _ = 0; ...)`, `using var _ = ...`, `catch (E _)` | A *named local*; a second one in the same or nested scope is CS0128/CS0136. |
-| `M(int _)` (method, local function, constructor, record/primary-constructor parameter) | A *named parameter*. `M(int _, int _)` is CS0100. |
-| `_ => _ + 1`, `(_, x) => _ + x` | A *named lambda parameter* (only one `_` in the list). |
-| `(_, _) => 0`, `(int _, int _) => 0` | *Discard parameters* (two or more `_` in the same list). `(_, _) => _` is CS0103, or silently binds to an *outer* `_`. |
-| `(_, @_) => ...` | One `_` plus one `@_`: `@_` is not counted, so both are named parameters with the same name: CS0100. |
-| `out _` | A *discard* if nothing named `_` is in scope; otherwise it *assigns the in-scope variable* (CS1503 if its type does not match). |
-| `out var _`, `out int _`, `o is int _`, `o is var _`, `var (_, x) = ...`, `(int _, int y) = ...` | *Always* a discard, even if a variable named `_` is in scope. |
-| `_ = e;` | A discard if nothing named `_` is in scope, otherwise an *assignment*. If `_` is a method group the result is CS1656. |
-| `(_, x) = (1, 2);` | A discard if nothing is in scope, otherwise an assignment to the in-scope `_`, or an error if the type of `_` is incompatible. |
-| `foreach ((_, x) in e)` | Error CS8186 whether or not `_` is in scope. |
-| `e switch { ... _ => ... }` | *Always* the discard pattern, even when a local, field **or constant** named `_` is in scope. |
-| `switch (e) { case _: }` | Error CS0103 if nothing named `_` exists; the *constant pattern* (warning CS8512) if a constant `_` is in scope; the *type pattern* if a type `_` is in scope. |
-| `e is _` | Error CS0246 if nothing named `_` exists or if `_` is a constant/field (the right operand is bound as a type); CS0118 if `_` is a local; the *is-type test* (warning CS8513) if a type `_` is in scope. |
-| `(a, b) is (_, _)`, `s is { Length: _ }` | *Always* discard subpatterns, even if a constant or type `_` is in scope. |
-| `o is _ x`, `o switch { _ x => 1 }`, `t is (_ a, _ b)` with a type named `_` | A *parse error*: the parser never treats the token `_` as the start of a type in a pattern (the type must be written `@_`). |
-| `nameof(_)`, `$"{_}"` | The name of / value of a named `_` if one is in scope; CS0103 otherwise. |
-
-**The specified rules do not match the behavior.** The current standard text (§11.2.7 *Discard pattern*) says that an accessible constant named `_` turns a `_` in *any* pattern context into a constant pattern, and that a type named `_` is permitted as the type of a declaration pattern (`_ x`). There is an open issue to fix, but the above table shows how complicated that is as we move toward the specification for C# 14.
-
-**Developers get surprising results from perfectly reasonable code.**
+For example, the following `is` is the original `is` expression, not a pattern matching `is`:
 
 ```csharp
-var _ = Task.Run(Work);          // reads as a discard, is a local named '_'
-var _ = Task.Run(OtherWork);     // CS0128 - "already defined"
+using System;
 
-int.TryParse(s, out _);          // discard...
-string _ = "label";              // ...until someone adds an unrelated local
-int.TryParse(s, out _);          // now CS1503, far from the declaration that changed the meaning
+object someThing = MakeThing();
 
-Func<int, int, int> f = (_, _) => _;   // CS0103
-Func<int, int, int> g = (_, x) => _;   // fine: '_' is the first parameter
+if (someThing is _)
+{
+    Console.WriteLine("Type or discard");
+}
+
+static object MakeThing() => new Random().Next(0, 1) == 1 
+? new object() : new _();
+
+public class _ {}
 ```
 
-**The compiler and tools pay for it too.** The decision is spread across the parser (`IsTrueIdentifier`, and pattern/designation parsing in `LanguageParser_Patterns.cs` and `LanguageParser.cs` that special-cases the contextual `UnderscoreToken`), the binder (`FallBackOnDiscard` for deconstruction and `out`, `computeDiscards` in `Binder_Lambda` which counts underscores per lambda, `wasUnderscore` in `BindIsOperator`, `WRN_CaseConstantNamedUnderscore`/`WRN_IsTypeNamedUnderscore` in the pattern binders), and in every IDE feature and analyzer that has to ask "is this `_` a symbol or a discard?" (rename, find references, unused-parameter and unused-value analyzers, `IParameterSymbol.IsDiscard`).
+To help developers, we issue a warning on the `if (someThing is _)` that developers should either type `if (something is var _)` to mean a discard, or `if (someThing is @_)` to clarify that the type check is desired.
 
-**Expected outcome.** `_` always means "I don't care about this value" and never means anything else. All tools could respect that assumption. If `_` is in a location where a type is expected, a compiler error is generated. A developer can read `_` without looking at the surrounding scope. Where someone genuinely needs the name `_` (rare; mostly interop with generated code or a symbol imported from a library) there is an explicit, already-supported spelling, `@_`.
+For another example, consider the following:
+
+```csharp
+var _ = 5;
+
+Func<int, int> func1 = (_) => _; 
+Func<int, int, int> func2 = (_, _) => _;
+
+Console.WriteLine(func1(6));  // Output: "6"
+
+Console.WriteLine(func2(7,8)); // Output: "5"
+```
+
+In `func1`, the single parameter `_` is a parameter, and the value of the argument is returned. In `func2`, both parameters are discards, and the return is the value of the captured local variable, `_`.
+
+If the declaration of the local variable `_` is removed, the declaration of `func1` is unchanged, but the declaration of `func2` emits a compiler error.
+
+Under this proposal, `_` is always as a *discard_token* and never means anything else. All tools could respect that assumption. If `_` is in a location where a type is expected, a compiler error is generated. A developer can read `_` without looking at the surrounding scope. Where someone genuinely needs the name `_`, there is an explicit, already-supported spelling, `@_`.
 
 ## Detailed design
 [design]: #detailed-design
 
-### Principle
+### One meaning for `_`
 
-1. The token `_` is a *discard-token*. It is **not** an *identifier*.
-2. A *discard-token* never binds to, declares, or is looked up as a name. Simple-name lookup never finds a declaration "named `_`" because no declaration can be named by a *discard-token*.
-3. Every grammar position that takes an *identifier* continues to accept `@_` (an *identifier* whose name is `_`). Every grammar position that should accept a discard says so explicitly.
-4. In a position where a *discard-token* is syntactically present but not permitted, it is a compile-time error. The diagnostic says that `_` is a discard and suggests `@_` if a name was intended.
+The rule is the same in every context: bare `_` is a *discard_token*, never an identifier. It cannot declare a name or refer to a named program element. A declaration named `_` can still exist, but it is written and referenced as `@_`. It has no effect on any discard in the surrounding code.
 
-### Lexical structure and grammar (§6.4.3 Identifiers)
+That rule doesn't make discards legal everywhere. The existing discard contexts remain available. An ordinary variable declaration still needs an identifier, and a discard cannot be read as a value. For example, `out _` discards an output value, but `Use(_)` is an error.
 
-Existing text ([lexical-structure.md](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/lexical-structure.md)):
+Most of the design consists of specification changes: separate the discard token from identifiers, remove the compatibility rules that consult name lookup, and remove the exception for a single discard parameter. Some of these changes describe behavior the compiler already implements, particularly for discard designations and most patterns. Others change observable behavior, including uses of `_` as a name and single-`_` anonymous-function parameters. The necessary compiler work is summarized at the end of this section.
 
-```antlr
-identifier
-    : Simple_Identifier
-    | contextual_keyword
-    | discard_token
-    ;
+The specification references below use the draft-v8 section numbering used by the existing proposal. Throughout this section, ~~strikethrough~~ indicates text being removed from the existing specification, and **bold** indicates text being added.
 
-discard_token
-    : '_'
-    ;
+### Lexical structure (§6.4.3)
+
+In [Identifiers](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/lexical-structure.md#643-identifiers), remove *discard_token* from the *identifier* production. Also exclude the literal, single-character spelling `_` from *Available_Identifier*. Both changes are needed: removing the explicit alternative alone would still allow `_` to match *Simple_Identifier*.
+
+```diff
+ identifier
+     : Simple_Identifier
+     | contextual_keyword
+-    | discard_token
+     ;
+
+ discard_token
+     : '_'
+     ;
+
+ fragment Available_Identifier
+-    // excluding keywords or contextual keywords, see note below
++    // excluding keywords, contextual keywords, and the literal spelling '_'
+     : Basic_Identifier
+     ;
 ```
 
-Replace with:
+The accompanying lexical note must describe this additional exclusion. The longest-token rule is unchanged, so identifiers such as `_x` and `x_` are unaffected. Existing restrictions on identifiers containing consecutive underscores are also unchanged.
 
-```antlr
-identifier
-    : Simple_Identifier
-    | contextual_keyword
-    ;
+*Escaped_Identifier* remains `'@' Basic_Identifier`, so `@_` is an identifier whose name is `_`. Unicode escape processing is unchanged: `\u005F` also remains an identifier, not a *discard_token*. The exclusion applies to the literal spelling `_`, not to every identifier whose name becomes `_` after identifier-equivalence transformations. `@_` is the explicit spelling used in this proposal's examples; the question of further guidance on Unicode escapes remains in [Open questions](#open-questions).
 
-discard_token
-    : '_'
-    ;
-```
+Replace the context-dependent identifier semantics in §6.4.3:
 
-and exclude the single character `_` from the unescaped identifier production:
-
-```antlr
-fragment Available_Identifier
-    // excluding keywords or contextual keywords, and excluding the single character '_' (a discard_token), see note below
-    : Basic_Identifier
-    ;
-```
-
-`Escaped_Identifier` (`'@' Basic_Identifier`) is unchanged, so `@_` remains a *Simple_Identifier* spelled `_`. `__`, `_x`, `x_` etc. are unaffected.
-
-Existing text:
-
-> The semantics of an identifier named `_` depends on the context in which it appears:
+> ~~The semantics of an identifier named `_` depends on the context in which it appears:~~
 >
-> - It can denote a named program element, such as a variable, class, or method, or
-> - It can denote a discard ([§9.2.9.2](variables.md#9292-discards)).
-
-Replace with:
-
-> The token `_` is a *discard_token* and is not an identifier. It always denotes a discard ([§9.2.9.2](variables.md#9292-discards)) where a *discard_token* is permitted by the grammar and the rules of this specification, and is a compile-time error everywhere else. The identifier `@_` (and any spelling of `_` that uses a *Unicode_Escape_Sequence*, such as `\u005F`) is an ordinary identifier that happens to have the name `_`; it can name any program element and is referred to by `@_`.
+> - ~~It can denote a named program element, such as a variable, class, or method, or~~
+> - ~~It can denote a discard (§9.2.9.2).~~
 >
-> *Note*: Because a *discard_token* is not an identifier, `_` and `@_` are **not** "the same identifier" for the purposes of the identifier-equivalence rules above. The `@` prefix is removed from `@_` and the resulting name is `_`, which is also the name that appears in metadata and reflection. *end note*
+> **The token `_` is a *discard_token*, not an identifier. It denotes a discard where the grammar and semantic rules permit a discard, and its use elsewhere is a compile-time error. An identifier whose name is `_`, such as `@_`, denotes a named program element, not a discard.**
 
-Today (before this proposal) `@_` and `\u005F` are textually distinct from `_` but resolve to the same name, which is why every existing use of `_` as a name can be mechanically rewritten to `@_` with no change of meaning (see [Compatibility and migration](#compatibility-and-migration)). *end note*
+The identifier-equivalence rules still remove the `@` prefix and expand Unicode escapes. They apply to `@_` and `\u005F`, but not to the discard token, because it is no longer an identifier. The name of a program element declared with `@_` remains `_` in metadata.
 
-### Where `_` is permitted
+### Where discards are permitted
 
-| Position | Proposed meaning of `_` |
+The following table summarizes the allowed contexts. It doesn't relax other rules for those constructs, such as type checking, definite assignment, or restrictions on patterns that can never match.
+
+| Context | Meaning under this proposal |
 | --- | --- |
-| Discard pattern, subpattern, switch-expression arm (`_` as a *pattern*) | Discard pattern (unchanged), unconditionally |
-| *discard_designation* (`T _`, `var _`, `var (_, x)`) in patterns and deconstruction | Discard (unchanged) |
-| `out _`, `out T _`, `out var _` | Discard, unconditionally |
-| `_ = e;` and `_ = ref e;` | Discard assignment, unconditionally |
-| *deconstructor_element* `_` | Discard, unconditionally |
-| Declarator in a local variable declaration (`T _ = e;`, `var _ = e;`), `using`, `for` initializer | **Error.** Write `@_`, or use `_ = e;` to discard a result |
-| `foreach (T _ in e)` / `foreach (var _ in e)` / `await foreach` | **Error.** Write `@_` |
-| `catch (T _)` | **Error.** Write `@_`, or omit the exception variable: `catch (T)` |
-| Lambda / anonymous method parameter, any count (`_ => ...`, `(_, x) => ...`, `(int _) => ...`, `delegate (int _) {...}`) | Discard parameter, unconditionally |
-| Method, local function, constructor, indexer, operator, delegate, accessor, record/primary-constructor parameter | **Error.** Write `@_` |
-| Field, property, event, method, local function, type, type parameter, namespace, enum member, using alias, label, query range variable, tuple element name, named argument name, object/`with` initializer member, member-pattern name, attribute argument name, `x._` member access | **Error.** Write `@_` |
-| Anywhere an *expression* is required (`_ + 1`, `Use(_)`, `return _;`, `nameof(_)`, `$"{_}"`, `_ += 1`, `_++`) | **Error** |
-| The entire *pattern* of `e is _` or of a switch-statement `case _:` | **Error** (unchanged from the current rule in §11.2.7, now with no name-based exceptions) |
+| `out _`, `out T _`, `out var _` | Discard the output value |
+| `_ = e;`, `_ = ref e;` | Discard assignment |
+| `(_, x) = e`, `(T _, T x) = e`, `var (_, x) = e` | Discard the corresponding deconstructed value |
+| `e is T _`, `e is var _` | Discard designation; no name is introduced |
+| `_` in a switch-expression arm or a subpattern | Discard pattern |
+| Lambda or anonymous-method parameter written `_`, with any parameter count | Discard parameter |
+| The entire pattern in `e is _` or a switch-statement `case _:` | Error; use `var _` to match any value |
+| Ordinary named declarations, including local variables, resources, iteration variables, exception variables, and method parameters | Error; use an identifier such as `@_` |
+| Type names, member names, aliases, labels, query range variables, tuple element names, and named argument names | Error; use an identifier such as `@_` |
+| A value read, such as `Use(_)`, `return _;`, `_ + 1`, `nameof(_)`, or `$"{_}"` | Error; a discard has no value that can be read |
+| `_ += 1`, `_++` | Error; these operations require a readable variable, not a discard |
 
 ### Simple names and declaration expressions (§12.8.4, §12.19)
 
-§12.8.4 currently ends the simple-name algorithm with:
+The [simple-name lookup](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/expressions.md#1284-simple-names) algorithm no longer needs a fallback to a discard:
 
-> - Otherwise, if `e` is zero and `I` is the identifier `_`, the *simple_name* is a *simple discard*, which is a form of declaration expression ([§12.19](expressions.md#1219-declaration-expressions)).
+> - ~~Otherwise, if `e` is zero and `I` is the identifier `_`, the *simple_name* is a *simple discard*, which is a form of declaration expression (§12.19).~~
 > - Otherwise, the *simple_name* is undefined and a compile-time error occurs.
 
-Remove the first bullet. A *simple_name* is by definition an *identifier* (optionally with type arguments), and `_` is not an identifier, so simple-name lookup can never find, hide, or fall back to a discard.
+A *simple_name* starts with an identifier. Because `_` is not an identifier, lookup never searches for a declaration on behalf of a discard. Lookup of `@_` continues to follow the ordinary rules.
 
-§12.19 currently says:
+In [Declaration expressions](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/expressions.md#1219-declaration-expressions), recognize the discard token directly:
 
-> The *simple_name* `_` is also considered a declaration expression if simple name lookup did not find an associated declaration ([§12.8.4](expressions.md#1284-simple-names)). When used as a declaration expression, `_` is called a *simple discard*. It is semantically equivalent to `var _`, but is permitted in more places.
-
-Replace with:
-
-> A *discard_token* in an expression position is a declaration expression called a *simple discard*. It is semantically equivalent to `var _`, but is permitted in more places. A *discard_token* is never reclassified as a *simple_name*, and is never affected by any declaration in scope.
-
-and extend the grammar:
-
-```antlr
-declaration_expression
-    : local_variable_type (identifier | discard_token)
-    | discard_token
-    ;
+```diff
+ declaration_expression
+-    : local_variable_type identifier
++    : local_variable_type (identifier | discard_token)
++    | discard_token
+     ;
 ```
 
-The list of syntactic contexts in §12.19 (an `out` *argument_value*, the left side of a simple assignment, a *deconstructor_element*) is unchanged. A simple discard in any other expression position is a compile-time error.
+> ~~The *simple_name* `_` is also considered a declaration expression if simple name lookup did not find an associated declaration (§12.8.4).~~ **A *discard_token* used as a declaration expression** is called a *simple discard*. It is semantically equivalent to `var _`, but is permitted in more places.
 
-The sentence "A declaration expression with the identifier `_` is a discard" becomes "A declaration expression whose designation is a *discard_token* is a discard". The existing `DeclarationExpressions3` example in §12.19 is shown below; the comments inside the body describe current behavior. Under the proposal, the declaration of `M2` itself is invalid because ordinary method parameters require an identifier:
+The permitted contexts remain `out` arguments, the left side of a simple assignment, and deconstruction elements, together with the existing rules for ref discard assignments. This grammar change does not permit a discard in an arbitrary expression or a parenthesized declaration expression.
 
-```csharp
-void M1(out int i) { ... }
+The rule that decides whether a declaration expression introduces a name becomes:
 
-void M2(string _)   // Proposed: error at the parameter declaration; write @_.
-{
-    M1(out _);      // Error: `_` is a string
-    M1(out var _);
-}
-```
+> A declaration expression ~~with the identifier `_`~~ **containing a *discard_token* in place of an identifier** is a discard (§9.2.9.2), and does not introduce a name for the variable. A declaration expression with an identifier ~~other than `_`~~ introduces that name into the nearest enclosing local variable declaration space (§7.2).
 
-is replaced by
+Update the specification examples to make the distinction explicit. For example, an ordinary method parameter must be written `@_`, while `out _` never refers to that parameter:
 
 ```csharp
-void M1(out int i) { ... }
+void M1(out int value) { value = 0; }
 
 void M2(string @_)
 {
-    M1(out _);      // OK: a discard. `@_` is not affected
-    M1(out var _);  // OK: a discard
-    M1(out @_);     // Error: `@_` is a string
+    M1(out _);      // Discard; the string parameter is unchanged.
+    M1(out var _);  // Discard.
+    M1(out @_);     // Error: the named parameter is a string, not an int.
 }
 ```
 
-### Deconstructing assignment (§12.23.3)
+This is a behavior change for `out _` when lookup currently finds a symbol. It is not a change for `out var _` or `out T _`, which already denote discards.
 
-Remove the backward-compatibility paragraph:
+### Assignment and deconstruction (§12.23)
 
-> For backward compatibility if any *deconstructor_element* is a *discard_token* then:
+The [assignment rules](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/expressions.md#1223-assignment-operators) already allow discards as targets of simple, ref, and deconstructing assignments. Those forms remain available, and compound assignment still does not permit a discard.
+
+In [Deconstructing assignment](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/expressions.md#12233-deconstructing-assignment), replace the lookup-dependent interpretation:
+
+> ~~For backward compatibility if any *deconstructor_element* is a *discard_token* then:~~
 >
-> - If name lookup ([§12.8.4](expressions.md#1284-simple-names)) for “`_`” finds an associated declaration then the *discard_token* is reclassified as a *simple_name*, which is syntactically a *variable_reference*.
-> - Otherwise the *discard token* is a simple discard ([§12.19](expressions.md#1219-declaration-expressions)).
+> - ~~If name lookup (§12.8.4) for “`_`” finds an associated declaration then the *discard_token* is reclassified as a *simple_name*, which is syntactically a *variable_reference*.~~
+> - ~~Otherwise the *discard token* is a simple discard (§12.19).~~
+>
+> **A *discard_token* used as a *deconstructor_element* is always a simple discard (§12.19).**
 
-Replace with:
+Remove references to reclassified discard tokens from the writeability and contextual restrictions. Remove only the disambiguation rule that chooses between a discard token and a variable reference; the rule that distinguishes a nested deconstructor from a variable reference is still needed. The remaining rules for deconstruction, including which elements must declare variables, are unchanged.
 
-> A *discard_token* that is a *deconstructor_element* is always a simple discard ([§12.19](expressions.md#1219-declaration-expressions)). To assign to a variable named `_`, use `@_` (a *variable_reference*).
+To assign to a variable named `_`, write `@_`:
 
-The statement "It is a compile time error if any *variable_reference*, including any reclassified *discard_token*s, occurring as a *deconstructor_element* is not writeable" drops "including any reclassified *discard_token*s". The grammar disambiguation sentence ("as a *discard_token* and as a *variable_reference*") is no longer needed because the two alternatives can no longer both match a single token.
+```csharp
+int @_ = 0;
+int x;
+(_, x) = (1, 2);  // Discards 1; @_ remains 0.
+(@_, x) = (3, 4); // Assigns 3 to @_.
+```
 
-### Assignment (§12.23)
-
-No grammar change. The statement "The target of a *simple_assignment*, *ref_assignment*, or any target of a *deconstructing_assignment* may be a discard" now means exactly "the target is a *discard_token*". The left operand of a *compound_assignment* shall not be a discard (unchanged), so `_ += 1` is an error whether or not an `@_` exists.
+The same distinction applies to `_ = e;` and `_ = ref e;`. Their meaning no longer depends on whether a variable, type, or other declaration named `_` is in scope.
 
 ### Discards as variables (§9.2.9.2)
 
-Existing text:
+Update [Discards](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/variables.md#9292-discards) to describe the syntax without treating `_` as a name:
 
-> A ***discard*** is a local variable that has no name. A discard is introduced by a declaration expression ([§12.19](expressions.md#1219-declaration-expressions)) with the identifier `_`; and is either implicitly typed (`_` or `var _`) or explicitly typed (`T _`).
+> A ***discard*** is a local variable that has no name. A discard is introduced by a declaration expression (§12.19) ~~with the identifier `_`~~ **with a *discard_token*, or by a *discard_designation* (§11.2.3)**; and is either implicitly typed (`_` or `var _`) or explicitly typed (`T _`).
 >
-> *Note*: `_` is a valid identifier in many forms of declarations. *end note*
+> *Note*: ~~`_` is a valid identifier in many forms of declarations.~~ **The token `_` is never an identifier. Use `@_` to declare a named program element.** *end note*
 
-Replace with:
+Remove the example's assumption that no declaration named `_` is in scope. Discards already have no name; the change removes the possibility that a bare `_` refers to a named variable instead. Discard parameters and discard patterns retain their own rules below.
 
-> A ***discard*** is a local variable that has no name. A discard is introduced by a declaration expression ([§12.19](expressions.md#1219-declaration-expressions)) ~~with the identifier `_`~~ **with the *discard_token*** **or by a *discard_designation* ([§11.2.3](patterns.md#1123-declaration-pattern))**; and is either implicitly typed (`_` or `var _`) or explicitly typed (`T _`).
+### Ordinary declarations (§13 and declaration clauses)
+
+No new discard declarations are added. The grammars for local variable declarations, `using`, `for` initializers, non-deconstructing `foreach`, and exception variables continue to require an *identifier*. Removing `_` from identifiers therefore makes these declarations errors, even when the variable is never read:
+
+```csharp
+var _ = Compute();             // Error: a local declaration needs an identifier.
+using var _ = OpenResource();  // Error: a resource declaration needs an identifier.
+foreach (var _ in items) { }   // Error: an iteration variable needs an identifier.
+```
+
+Use `@_` when a named variable is required. When only the result of an expression is unwanted, use `_ = Compute();`. That is not a replacement for a `using` declaration: a named resource such as `using var @_ = OpenResource();` preserves disposal.
+
+The same identifier requirement applies to constants, ref locals, fixed variables, and scoped local declarations. Synchronous, asynchronous, and ref forms of non-deconstructing `foreach` all require a named iteration variable. Deconstructing `foreach`, such as `foreach (var (_, item) in items)`, continues to permit discard designations, subject to its existing declaration requirements. `foreach (_ in items)` is not a new discard form.
+
+The exception-specifier grammar remains `exception_specifier : '(' type identifier? ')'`. Write `catch (E @_)` for a named exception variable, or `catch (E)` when no variable is needed; `catch (E _)` is an error.
+
+### Anonymous functions and parameter scopes (§12.21.2, §7.7)
+
+In [Anonymous function signatures](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/expressions.md#12212-anonymous-function-signatures), explicitly allow a discard token where a lambda or anonymous method specifies a parameter. The following changes show the relevant productions; other parameter syntax is unchanged.
+
+```diff
+ explicit_anonymous_function_parameter
+-    : anonymous_function_parameter_modifier? type identifier
++    : anonymous_function_parameter_modifier? type (identifier | discard_token)
+     ;
+
+ implicit_anonymous_function_parameter
+     : identifier
++    | discard_token
+     ;
+```
+
+Replace the counting rule and the single-parameter compatibility exception in [Lambda discard parameters](csharp-9.0/lambda-discard-parameters.md):
+
+> In the parameter list of a lambda or anonymous method ~~with more than one parameter named `_`, such parameters are discard parameters~~ **each parameter written with a *discard_token* is a discard parameter**.
 >
-> *Note*: `_` is never an identifier; a program element that is actually named `_` is declared with `@_`. *end note*
+> ~~Note: if a single parameter is named `_` then it is a regular parameter for backwards compatibility reasons.~~
 
-and delete the sentence in the example, "The example assumes that there is no declaration of the name `_` in scope.", which is now vacuous.
+A discard parameter has the type, modifiers, and other permitted parameter syntax it would otherwise have, but introduces no name to any scope. The scope rules in §7.7 and the lambda-discard-parameters specification already exclude discard parameters; that exclusion now applies regardless of how many `_` tokens appear. Named-parameter conflicts continue to apply to identifiers such as `@_`, not to discard parameters.
 
-### Local variable declarations, `using`, `for` (§13.6.2, §13.14 and §13.9.4)
-
-*Existing grammar* (abbreviated):
-
-```antlr
-implicitly_typed_local_variable_declarator
-    : identifier '=' expression
-    ;
-
-explicitly_typed_local_variable_declarator
-    : identifier ('=' local_variable_initializer)?
-    ;
+```csharp
+Func<int, int> ignore = _ => 0;             // One discard parameter.
+Func<int, int> identity = @_ => @_;        // One named parameter.
+Func<int, int, int> second = (_, @_) => @_; // A discard and a named parameter.
+Func<int, int> invalid = _ => _;           // Error: a discard cannot be read.
 ```
 
-No grammar change. These declarators continue to require an *identifier*. Because `_` is not an identifier, `int _ = e;`, `var _ = e;`, `using var _ = e;`, `using (var _ = e) { }`, `await using var _ = e;`, and `for (int _ = 0; ... )` are compile-time errors at the declaration, even if the variable would never be read.
+Single-`_` parameters now behave like the existing multiple-discard parameters. A bare `_` in the body cannot refer to a parameter or an outer declaration; `_ => { _ = 5; }` performs a discard assignment, not an assignment to the argument.
 
-`ref_local_variable_declarator`, `constant_declarator`, `fixed`, `static` locals and `scoped` locals also keep `identifier`: `ref var _ = ref x;` and `const int _ = 1;` are errors. Use `@_` to declare a named variable or resource. To evaluate an expression and discard its result without a variable declaration, use `_ = e;` (or `_ = ref x;` for a ref discard assignment).
-
-### `foreach` (§13.9.5)
-
-Existing grammar:
-
-```antlr
-foreach_statement
-    : // synchronous foreach
-      'foreach' '(' ref_kind? local_variable_type identifier 'in' expression ')'
-          embedded_statement
-    | // asynchronous foreach
-      'await' 'foreach' '(' local_variable_type identifier 'in' expression ')'
-          embedded_statement
-    | // deconstructing foreach
-      'await'? 'foreach' '(' deconstructor 'in' expression ')'
-          embedded_statement
-    ;
-```
-
-No grammar change. The non-deconstructing forms continue to require an *identifier*, so `foreach (T _ in e)`, `foreach (var _ in e)`, and their asynchronous or `ref` forms are compile-time errors. Write `@_` for a named iteration variable. Discards within a deconstructing `foreach`, such as `foreach (var (_, item) in e)`, remain permitted. A bare `_` in `foreach (_ in e)` is also invalid.
-
-### Exception specifier (§13.11)
-
-The grammar `exception_specifier : '(' type identifier? ')'` is unchanged. `catch (E _)` is a compile-time error because `_` is not an identifier. Use `catch (E @_)` for a named exception variable, or `catch (E)` when no exception variable is needed.
-
-### Anonymous functions (§12.21.2) and parameter scopes (§7.7)
-
-Existing grammar uses `identifier` for `explicit_anonymous_function_parameter` and `implicit_anonymous_function_parameter`. New:
-
-```antlr
-explicit_anonymous_function_parameter
-    : anonymous_function_parameter_modifier? type (identifier | discard_token)
-    ;
-
-implicit_anonymous_function_parameter
-    : identifier
-    | discard_token
-    ;
-```
-
-The existing csharplang spec for [lambda discard parameters](csharp-9.0/lambda-discard-parameters.md) says:
-
-> In the parameter list of a lambda or anonymous method with more than one parameter named `_`, such parameters are discard parameters.
-> Note: if a single parameter is named `_` then it is a regular parameter for backwards compatibility reasons.
-
-Replace with:
-
-> A parameter of a lambda or anonymous method whose name is the *discard_token* is a ***discard parameter***, regardless of how many such parameters the parameter list contains. A discard parameter has the declared (or inferred) type and modifiers as any other parameter, but introduces no name to any scope.
-
-and update the two scope sentences (§7.7 and the lambda-discard-parameters proposal)
-
-> With the exception of discard parameters, the scope of a parameter declared in a *lambda_expression* is the *anonymous_function_body* of that *lambda_expression*.
-
-so that they no longer need a count. The "Simple names" change of the lambda-discard-parameters proposal ("... parameter (with the exception of discard parameters) ...") is subsumed: a *simple_name* cannot be `_`.
-
-The rule in §12.21.2 that "it is a compile-time error for the name of a parameter of the anonymous function to match the name of a local variable, local constant or parameter whose scope includes the ..." is unchanged and never applies to discard parameters.
-
-**Method parameters.** Methods, local functions, constructors, indexers, operators, delegates, accessors and record/primary-constructor parameters keep `identifier` in the grammar. `_` as a parameter name there is an error ("'_' is a discard; use '@_' to name a parameter '_'"). See [Open questions](#open-questions) for allowing discard parameters on local functions.
+Ordinary method, local-function, constructor, indexer, operator, delegate, and record/primary-constructor parameters continue to require identifiers. This proposal does not extend discard parameters to those declarations.
 
 ### Patterns (§11.2)
 
-Existing grammar for designations:
+The [designation grammar](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/patterns.md#1123-declaration-pattern) already distinguishes *discard_designation* (`'_'`) from *single_variable_designation* (`identifier`). It needs no change. Once `_` is no longer an identifier, the sentence choosing *discard_designation* when both alternatives match, and its explanatory note, are unnecessary.
 
-```antlr
-simple_designation
-    : discard_designation
-    | single_variable_designation
-    ;
-discard_designation
-    : '_'
-    ;
-single_variable_designation
-    : identifier
-    ;
-```
+In [Discard pattern](https://github.com/dotnet/csharpstandard/blob/draft-v8/standard/patterns.md#1127-discard-pattern), remove the compatibility passage that consults simple-name lookup and interprets `_` as a constant or type. State the direct rule instead:
 
-is unchanged (`identifier` no longer includes `_`, so the "when both alternatives are applicable the former shall be chosen" sentence and its note become unnecessary and are deleted).
-
-§11.2.7 *Discard pattern* currently reads:
-
-> Where the syntactic context permits a *pattern*, if the token `_` would resolve as a *simple_name* ([§12.8.4](expressions.md#1284-simple-names)) to an accessible constant or to a type, then `_` is *not* treated as a *discard_pattern*. Instead:
+> **Where the syntactic context permits a *pattern*, the token `_` is a *discard_pattern*. It is never interpreted as a reference to a constant or type.**
 >
-> - If `_` resolves to an accessible constant, the `_` is interpreted as a *constant_pattern* ([§11.2.2](patterns.md#1122-constant-pattern)) whose constant expression is that constant.
-> - If `_` resolves to a type, then in the right-hand side of an `is` operator the construct *relational_expression* `is _` is interpreted as the is-type operator ([§12.14.12.1](expressions.md#1214121-the-is-type-operator)) testing against that type. In any other syntactic context that admits a *pattern*, a bare `_` resolving to a type is not by itself a valid *pattern*; however, `_` may appear as the *type* of a *declaration_pattern* (e.g., `_ x`) or in other pattern forms that explicitly name a type.
->
-> This rule preserves backward compatibility with code that defined `_` as a type or identifier prior to the introduction of the discard pattern. If `_` resolves to anything other than an accessible constant or type (for example, a local variable, parameter, field, or method), the rule does not apply and `_` remains a *discard_pattern*.
->
-> *Note*: This is analogous to the rule for `var` in [§11.2.4](patterns.md#1124-var-pattern), except that for `_` an in-scope constant or type causes `_` to be interpreted as a reference to that declaration rather than producing an error. *end note*
->
-> If, after applying the preceding rule, the token `_` is still a *discard_pattern*, it is a compile-time error for that *discard_pattern* to appear as the entire *pattern* of a *relational_expression* of the form *relational_expression* `is` *pattern*, or as the entire *pattern* of a *switch_label*. A *discard_pattern* may, however, appear as a *subpattern* of an enclosing pattern (for example, as a *subpattern* of a *positional_pattern* or *property_pattern*).
+> ~~If, after applying the preceding rule, the token `_` is still a *discard_pattern*, it~~ **It** is a compile-time error for ~~that~~ **a** *discard_pattern* to appear as the entire *pattern* of a *relational_expression* of the form *relational_expression* `is` *pattern*, or as the entire *pattern* of a *switch_label*. A *discard_pattern* may, however, appear as a *subpattern* of an enclosing pattern.
 
-Replace the whole passage (keeping the final "*Note*: ... use a *var_pattern* with a discard `var _`") with:
+Keep the note recommending `var _` to match any value in those two positions. Discard patterns remain permitted in switch-expression arms, subpatterns, and combinations with other patterns, subject to the existing semantic rules.
 
-> The token `_` where a *pattern* is expected is always a *discard_pattern*. It is never interpreted as a constant, a type, or any other name: a constant named `_` is written `@_` (a *constant_pattern*), and a type named `_` is written `@_` (a *type_pattern* / the type of a *declaration_pattern*).
->
-> It is a compile-time error for a *discard_pattern* to appear as the entire *pattern* of a *relational_expression* of the form *relational_expression* `is` *pattern*, or as the entire *pattern* of a *switch_label*. A *discard_pattern* may appear as a *subpattern* of an enclosing pattern, as an arm of a *switch_expression*, and under `not`/`and`/`or` combinators.
->
-> *Note*: To match any value in those two positions, use `var _`. *end note*
-
-The `WithoutUnderscore`/`WithUnderscore` example in §11.2.7 (in which an in-scope constant `_` changes the meaning of the `_` arm) is replaced by an example showing that `const int @_ = 0;` has no effect on `_ => ...` and that `@_ => ...` matches the constant.
-
-§11.2.3 note:
-
-> *Note*: This treatment of `_` within a *declaration_pattern* differs from that of a standalone `_` written as a *pattern* ([§11.2.7](patterns.md#1127-discard-pattern)): in the latter case, an in-scope constant or type named `_`, if any, is *not* hidden. *end note*
-
-is deleted: there is no longer any difference.
-
-### Names and types (§7.8, §12.8.7 and others)
-
-No text is needed beyond the grammar change, because they all take an *identifier*: *namespace_or_type_name*, *type_parameter*, *member_access*, *named_argument*, *tuple_element*, *label*, *object_initializer* members, *member_declarator*, *property_subpattern* names, *query* range variables, `nameof`, interpolation holes, attribute arguments. `_` in any of those is a syntax or semantic error with the diagnostic described in the Principle, and `@_` works:
+A constant or type named `_` must be referenced using an identifier such as `@_`. Replace the lookup-dependent specification example with one that shows both spellings:
 
 ```csharp
-class @_ { public int @_; }            // type and field named '_'
-@_ v = new @_ { @_ = 1 };
-var s = nameof(@_);                    // "_"
-if (o is @_ x) { }                     // declaration pattern on the type named '_' (today only this spelling parses)
-var t = (@_: 1, b: 2); var one = t.@_; // tuple element named '_'
+const int @_ = 0;
+string Describe(int value) => value switch
+{
+    @_ => "zero",   // Constant pattern.
+    _ => "other"    // Discard pattern; the constant has no effect.
+};
 ```
 
-### Diagnostics
+Remove the declaration-pattern note that contrasts its discard designation with the name-dependent interpretation of a standalone `_`. Remove similar scope-dependent explanations in the var-pattern text.
 
-- **New error**: *"'_' is a discard and cannot be used here. Use '@_' to refer to or declare a program element named '_'."* reported (a) for a *discard_token* where an *expression* or *identifier* is required, (b) for the parameter positions in the table above, and (c) for the other declaration positions.
-- `WRN_CaseConstantNamedUnderscore` (CS8512) and `WRN_IsTypeNamedUnderscore` (CS8513) become unreachable and are retired (the compiler's existing guidance for both already is "use `var _` to discard, or `@_` to refer to the declaration").
-- A declaration requiring an identifier is an error when written with `_`, with or without an initializer (`int _;`, `int _ = e;`, `var _ = e;`). Lambda and anonymous-method discard parameters, declaration expressions in `out` arguments, and discard designations in patterns and deconstruction are permitted as described above.
-- The unused-local, unused-parameter, and `IDE0059`/`IDE0060` analyzers need no special handling for `_` any more.
+These edits need a distinction between specification cleanup and compiler behavior. Roslyn already treats `_` as a discard in switch-expression arms and subpatterns, even when a constant or type named `_` is in scope. Removing the standard's contrary compatibility text aligns those cases; it does not introduce a compiler behavior change there. However, `is _` can currently test a type, and `case _:` can currently match a constant or type. Under this proposal both forms are errors, with no name-based exception. The restriction on a whole discard pattern is retained, not newly added.
 
-### Implementation notes (Roslyn)
+### Names and types
 
-The contextual `SyntaxKind.UnderscoreToken` already identifies the token (`IsUnderscoreToken`), so the lexer/parser work is mostly to make it *non*-contextual and recognize it unconditionally in the permitted discard positions, including single-parameter lambdas and anonymous methods. In the binder, `FallBackOnDiscard` (Binder_Expressions.cs) and the `wasUnderscore` special-casing in `BindIsOperator` (Binder_Operators.cs), the `underscoresCount` logic in Binder_Lambda.cs, and `reportIfConstantNamedUnderscore` (SwitchBinder_Patterns.cs) disappear or collapse. Ordinary variable, iteration-variable, resource, exception-variable, and member-parameter declarations continue to require identifiers; there are no new discard-local lowering rules. This is an estimate for discussion; it has not been prototyped.
+All other positions requiring an identifier keep that requirement. This includes names of types, namespaces, members, type parameters, aliases, labels, query range variables, tuple elements, and named arguments. Member access, initializer member names, and member-pattern names also require identifiers. A bare `_` is not valid in any of those positions.
+
+`nameof` operands, interpolation holes, and attribute argument values are expressions rather than simply identifier positions. They follow the expression rules: a discard cannot be used as a value or as the name of a program element.
+
+The ordinary spelling `@_` remains available wherever an identifier is accepted, subject to the usual declaration and lookup rules:
+
+```csharp
+@_ value = new @_();
+string name = nameof(@_);      // "_".
+var tuple = (@_: 1, b: 2);     // A tuple element named '_'.
+int first = tuple.@_;
+
+class @_ { public int Value; } // A type named '_'.
+```
+
+### Diagnostics and compiler changes
+
+Diagnostics for invalid uses should explain that `_` is a discard and suggest `@_` when a name was intended. For a whole `is _` or `case _:` pattern, guidance should distinguish using `var _` to match any value from using `@_` to refer to a constant or type. The compatibility warnings CS8512 and CS8513 are no longer applicable because the named interpretations that produce them are removed.
+
+The compiler changes are to recognize bare `_` as a non-identifier discard token, accept it in the permitted discard positions, and reject it in ordinary named declarations and references. Binding must stop falling back from name lookup to a discard and stop reinterpreting discard tokens as variables, constants, or types. Lambda and anonymous-method binding must recognize discard parameters without counting `_` parameters.
+
+Existing discard evaluation and lowering rules remain applicable; there are no new discard-local or resource-lifetime rules. Compiler APIs, IDE features, and migration support will need review for the distinction between `_` and `@_`; this proposal does not assume that analyzers need no changes. Implementation details and tests are future work. No Roslyn implementation has been prototyped as part of this design.
 
 ## Breaking changes
 [breaking-changes]: #breaking-changes
